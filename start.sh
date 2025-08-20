@@ -31,12 +31,9 @@ if [ ! -f "$server_binary" ]; then
 fi
 
 # Ensure execute permissions on the binary
-chmod +x "$server_binary"
-
-# Ensure this script is writable by the current user
-if [ ! -w "$0" ]; then
-    echo "Adjusting permissions for $0..."
-    chmod 644 "$0"  # Read/write for owner, read for others
+if [ ! -x "$server_binary" ]; then
+    echo "Setting execute permissions on server binary..."
+    chmod +x "$server_binary"
 fi
 
 echo "Starting The Blockheads Server"
