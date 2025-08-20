@@ -1,11 +1,14 @@
 #!/bin/bash
 # =============================
-# Blockheads Interactive Installer (English)
+# Blockheads Interactive Installer (English) - Improved UI detection
 # This installer will:
 #  - download and extract the Blockheads tarball
 #  - create a start.sh matching your choices
 #  - optionally create a systemd service
-# The script uses dialog/whiptail if available, otherwise falls back to interactive prompts.
+# The script uses dialog/whiptail if available and the terminal is interactive.
+# If dialog/whiptail cannot accept input (e.g. running from a non-interactive environment)
+# the script will automatically fall back to plain text prompts. You can also force
+# text mode with --text-ui or --no-dialog command-line flag.
 # =============================
 
 set -euo pipefail
@@ -18,32 +21,48 @@ cleanup() {
 # Helper: check for command
 _cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
+# Parse CLI flags to allow forcing text UI
+FORCE_TEXT_UI=false
+for arg in "$@"; do
+    case "$arg" in
+        --text-ui|--no-dialog)
+            FORCE_TEXT_UI=true
+            ;;
+    esac
+done
+
 # UI helpers: use dialog if present, else whiptail, else fallback to read
 DIALOG_CMD=""
-if _cmd_exists dialog; then
-    DIALOG_CMD="dialog"
-elif _cmd_exists whiptail; then
-    DIALOG_CMD="whiptail"
+if [ "$FORCE_TEXT_UI" = false ]; then
+    # Only enable dialog/whiptail if they exist and the script is running on an interactive TTY
+    if _cmd_exists dialog && [ -t 0 ] && [ -t 1 ]; then
+        DIALOG_CMD="dialog"
+    elif _cmd_exists whiptail && [ -t 0 ] && [ -t 1 ]; then
+        DIALOG_CMD="whiptail"
+    else
+        DIALOG_CMD=""
+    fi
 else
     DIALOG_CMD=""
 fi
 
 ui_input() {
     # ui_input "Title" "Prompt" "default"
-    local title="$1" prompt="$2" default="$3"
+    local title="$1" prompt="$2" default="$3" result=""
     if [ -n "$DIALOG_CMD" ]; then
         if [ "$DIALOG_CMD" = "dialog" ]; then
-            result=$(mktemp)
-            dialog --backtitle "Blockheads Installer" --ok-label "OK" --inputbox "$prompt" 10 60 "$default" 2>"$result" || true
-            cat "$result"; rm -f "$result"
+            tmpfile=$(mktemp)
+            dialog --backtitle "Blockheads Installer" --ok-label "OK" --inputbox "$prompt" 10 60 "$default" 2>"$tmpfile" || true
+            result=$(cat "$tmpfile")
+            rm -f "$tmpfile"
         else
-            whiptail --title "$title" --inputbox "$prompt" 10 60 "$default" 3>&1 1>&2 2>&3 || true
+            result=$(whiptail --title "$title" --inputbox "$prompt" 10 60 "$default" 3>&1 1>&2 2>&3 || true)
         fi
     else
         read -rp "$prompt [$default]: " result
         result=${result:-$default}
-        echo "$result"
     fi
+    echo "$result"
 }
 
 ui_yesno() {
@@ -81,18 +100,26 @@ WORK_DIR="$(pwd)"
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 TEMP_FILE="$TEMP_DIR/blockheads_server171.tar.gz"
 
+# Inform about UI mode (helpful when user can't press OK)
+if [ -n "$DIALOG_CMD" ]; then
+    echo "Interactive UI mode: $DIALOG_CMD (using dialog/whiptail)"
+else
+    echo "Text UI mode: dialog/whiptail disabled or terminal not interactive. Running plain prompts."
+    echo "If you prefer the graphical-like dialog boxes, run this script from a regular terminal emulator and do not double-click it."
+fi
+
 # Interactive flow: ask user for options
 if [ -n "$DIALOG_CMD" ]; then
     if [ "$DIALOG_CMD" = "dialog" ]; then
         dialog --backtitle "Blockheads Installer" --title "Welcome" --msgbox "Welcome to the interactive installer for The Blockheads server.
 
-It is recommended to run this script in the folder where you want the server files (for example: ~/blockheads-server).
+If you cannot press OK, run the installer with --text-ui to use plain prompts instead.
 
 Press OK to continue." 12 70
     else
         whiptail --title "Welcome" --msgbox "Welcome to the interactive installer for The Blockheads server.
 
-It is recommended to run this script in the folder where you want the server files (for example: ~/blockheads-server).
+If you cannot press OK, run the installer with --text-ui to use plain prompts instead.
 
 Press OK to continue." 12 70
     fi
@@ -108,7 +135,6 @@ install_dir=$(ui_input "Install directory" "Installation directory (absolute or 
 if [ -d "$install_dir" ]; then
     install_dir="$(cd "$install_dir" && pwd)"
 else
-    # Try to create parent and get absolute
     mkdir -p "$install_dir" 2>/dev/null || true
     install_dir="$(cd "$install_dir" 2>/dev/null && pwd || echo "$install_dir")"
 fi
@@ -219,7 +245,7 @@ fi
 cat > "$install_dir/start.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-DIR="\$(dirname "\$(readlink -f "$0")")"
+DIR="\$(dirname "\$(readlink -f \"\$0\")")"
 world_id="$world_id"
 server_port=$server_port
 log_dir="\$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/\$world_id"
@@ -296,6 +322,8 @@ echo "To run the server as a normal (non-root) user:"
 echo "  cd $install_dir && ./start.sh"
 
 echo "To monitor logs in real time: tail -f ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id/console.log"
+
+echo "If the dialog boxes don't accept keyboard input, run this installer with: sudo ./installer.sh --text-ui"
 
 echo "================================================================"
 
