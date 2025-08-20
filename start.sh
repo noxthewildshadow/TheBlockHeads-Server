@@ -1,48 +1,65 @@
 #!/bin/bash
 
 # =============================================================================
-# Script de inicio del servidor The Blockheads
-# Este script mantiene el servidor ejecutándose continuamente, reiniciando
-# automáticamente si se cierra inesperadamente.
+# The Blockheads Server Startup Script
+# This script keeps the server running continuously, restarting automatically
+# if it closes unexpectedly.
 # =============================================================================
 
-# Configuración del mundo y puerto
+# Configurable settings - user can adjust these values
 world_id="83cad395edb8d0f1912fec89508d8a1d"
 server_port=15151
 
-# Directorio de logs (usando ~ para el home del usuario)
-log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id"
+# Directories and paths
+user_home="$HOME"
+log_dir="$user_home/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id"
 log_file="$log_dir/console.log"
+server_binary="./blockheads_server171"
 
-# Asegurar que el directorio de logs existe
-mkdir -p "$log_dir"
+# Check and create log directory if it doesn't exist
+if [ ! -d "$log_dir" ]; then
+    echo "Creating log directory: $log_dir"
+    mkdir -p "$log_dir"
+    chmod 755 "$log_dir"
+fi
 
-# Contador de reinicios
-restart_count=0
+# Verify the server executable exists
+if [ ! -f "$server_binary" ]; then
+    echo "Error: Cannot find server executable $server_binary"
+    echo "Please run the installation script first."
+    exit 1
+fi
 
-echo "Iniciando servidor The Blockheads"
-echo "Mundo: $world_id"
-echo "Puerto: $server_port"
-echo "Registros en: $log_file"
-echo "Presiona Ctrl+C para detener el servidor"
+# Ensure execute permissions on the binary
+chmod +x "$server_binary"
+
+# Set permissions for future editing of this script
+chmod 644 "$0"  # Read/write for owner, read for others
+
+echo "Starting The Blockheads Server"
+echo "World: $world_id"
+echo "Port: $server_port"
+echo "Logs: $log_file"
+echo "Use Ctrl+C to stop the server"
 echo "----------------------------------------"
 
-# Bucle principal de ejecución
+# Restart counter
+restart_count=0
+
+# Main execution loop
 while true; do
-    # Incrementar contador de reinicios
-    ((restart_count++))
+    restart_count=$((restart_count + 1))
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
-    # Registrar inicio de sesión
-    echo "$(date): Iniciando servidor (reinicio #$restart_count)" >> "$log_file"
+    echo "[$timestamp] Starting server (restart #$restart_count)" >> "$log_file"
     
-    # Ejecutar servidor y capturar salida
-    ./blockheads_server171 -o "$world_id" -p "$server_port" >> "$log_file" 2>&1
+    # Run server and capture output
+    $server_binary -o "$world_id" -p "$server_port" >> "$log_file" 2>&1
     
-    # Registrar cierre inesperado
+    # Log exit and prepare for restart
     exit_code=$?
-    echo "$(date): Servidor cerrado inesperadamente (código: $exit_code)" >> "$log_file"
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] Server closed (exit code: $exit_code), restarting in 1s..." >> "$log_file"
     
-    # Esperar antes de reiniciar
-    echo "$(date): Reiniciando en 1 segundo..." >> "$log_file"
     sleep 1
 done
