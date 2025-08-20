@@ -8,6 +8,9 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Get the original user who invoked sudo
+ORIGINAL_USER=${SUDO_USER:-$USER}
+
 # Configuration variables
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 START_SCRIPT_URL="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server/refs/heads/main/start.sh"
@@ -49,7 +52,9 @@ echo "[5/5] Setting up start script..."
 wget -q "$START_SCRIPT_URL" -O start.sh
 chmod +x start.sh
 
-# Set proper permissions for editing
+# Set proper ownership and permissions
+echo "Setting proper file permissions..."
+chown $ORIGINAL_USER:$ORIGINAL_USER start.sh "$SERVER_BINARY"
 chmod 644 start.sh  # Read/write for owner, read for others
 
 # Clean up temporary file
@@ -59,10 +64,11 @@ rm -f "$TEMP_FILE"
 echo "================================================================"
 echo "Installation completed successfully"
 echo "================================================================"
+echo "To use and see commands ./blockheads_server171 --help"
 echo "To start the server run: ./start.sh"
 echo ""
 echo "Important configuration:"
-echo "- Default port: 8080"
+echo "- Default port: 15151"
 echo "- Ensure your firewall is properly configured"
 echo "- Worlds are saved in the current directory"
 echo ""
