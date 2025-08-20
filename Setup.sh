@@ -133,7 +133,7 @@ add_player_if_new() {
     local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
     
     if [ "$player_exists" = "false" ]; then
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0}')
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_help_time": 0}')
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Added new player: $player_name"
     fi
@@ -168,6 +168,21 @@ grant_login_ticket() {
         local next_login=$((last_login + 3600))
         local time_left=$((next_login - current_time))
         echo "$player_name must wait $((time_left / 60)) minutes for next ticket"
+    fi
+}
+
+# Show help message if needed (5 minutes cooldown)
+show_help_if_needed() {
+    local player_name="$1"
+    local current_time=$(date +%s)
+    local current_data=$(cat "$ECONOMY_FILE")
+    local last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time')
+    
+    if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
+        send_server_command "say $player_name, type !economy_help to see economy commands."
+        # Update last_help_time
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
+        echo "$current_data" > "$ECONOMY_FILE"
     fi
 }
 
@@ -233,7 +248,7 @@ process_message() {
             fi
             ;;
         "!economy_help")
-            send_server_command "say Economy commands: !tickets, !buy_mod (10), !buy_admin (20)"
+            send_server_command "say Economy commands: !tickets, !buy_mod (10 tickets), !buy_admin (20 tickets)"
             ;;
     esac
 }
@@ -268,6 +283,8 @@ process_admin_command() {
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
         send_server_command "say $player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
+    else
+        echo "Unknown admin command: $command"
     fi
 }
 
@@ -277,7 +294,7 @@ monitor_log() {
     echo "Starting economy bot. Monitoring: $log_file"
     echo "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
     echo "Admin commands: !send_ticket <player> <amount>"
-    echo "To send commands to server, type them and press Enter:"
+    echo "To send admin commands, type them and press Enter:"
     
     # Start reading from stdin for admin commands
     while read -r admin_command; do
@@ -296,6 +313,7 @@ monitor_log() {
             echo "Player connected: $player_name"
             add_player_if_new "$player_name"
             grant_login_ticket "$player_name"
+            show_help_if_needed "$player_name"
         fi
         
         # Detect player messages
@@ -346,6 +364,7 @@ echo "Example for bot: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheB
 echo ""
 echo "The economy bot features:"
 echo "- Players get 1 ticket every hour when they connect"
+echo "- First-time players get 1 ticket immediately"
 echo "- Commands: !tickets, !buy_mod (10), !buy_admin (20)"
 echo "- Admin commands: !send_ticket <player> <amount>"
 echo "- Economy data saved in: economy_data.json"
