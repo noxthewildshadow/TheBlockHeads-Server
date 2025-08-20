@@ -8,18 +8,11 @@ curl -sSL https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Serve
 
 
 
-Start server
+Start server:
 
 screen -S blockheads -d -m ./start.sh
 
-screen -ls
-
 screen -r blockheads
-
-
-
-
-screen -ls | grep -o '[0-9]*\.blockheads' | awk '{print $1}' | xargs -I {} screen -S {} -X quit
 
 killall screen
 
