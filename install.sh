@@ -50,12 +50,12 @@ patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY"
 
 echo "[5/5] Setting up start script..."
 wget -q "$START_SCRIPT_URL" -O start.sh
-chmod +x start.sh
 
 # Set proper ownership and permissions
 echo "Setting proper file permissions..."
 chown $ORIGINAL_USER:$ORIGINAL_USER start.sh "$SERVER_BINARY"
-chmod 644 start.sh  # Read/write for owner, read for others
+chmod 755 start.sh  # Read/write/execute for owner, read/execute for others
+chmod 755 "$SERVER_BINARY"  # Ensure server binary is executable
 
 # Clean up temporary file
 rm -f "$TEMP_FILE"
