@@ -8,19 +8,20 @@
 #
 set -euo pipefail
 
-# --------------------------
-# Config / valores por defecto
-# --------------------------
+# =========================
+# Valores por defecto
+# =========================
 DEFAULT_SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 DEFAULT_INSTALL_DIR="$(pwd)"
 DEFAULT_WORLD_ID="83cad395edb8d0f1912fec89508d8a1d"
 DEFAULT_PORT=15151
 SERVICE_NAME="blockheads.service"
 
-# --------------------------
+# =========================
 # Helpers
-# --------------------------
+# =========================
 _cmd_exists() { command -v "$1" >/dev/null 2>&1; }
+
 prompt_yesno() {
   local prompt="${1:-Continue?}"
   local default="${2:-Y}" # Y or N
@@ -41,9 +42,84 @@ prompt_yesno() {
   done
 }
 
-# --------------------------
+# Robust download function with fallbacks and informative errors
+download_file() {
+  local url="$1"
+  local dest="$2"
+
+  echo "  Intentando descargar: $url"
+  # Try wget (prefer retry and failfast)
+  if _cmd_exists wget; then
+    echo "    Usando wget..."
+    if wget --tries=3 --timeout=20 -O "$dest" "$url"; then
+      return 0
+    else
+      echo "    wget falló (intentando otros métodos)..."
+    fi
+  fi
+
+  # Try curl
+  if _cmd_exists curl; then
+    echo "    Usando curl..."
+    if curl -fSL --retry 3 --retry-delay 2 -o "$dest" "$url"; then
+      return 0
+    else
+      echo "    curl falló (intentando otros métodos)..."
+    fi
+  fi
+
+  # Try python3
+  if _cmd_exists python3; then
+    echo "    Usando python3 para descargar..."
+    if python3 - <<PYCODE
+import sys, urllib.request
+url = "$url"
+dest = "$dest"
+try:
+    urllib.request.urlretrieve(url, dest)
+    print("    python3: descarga completada")
+    sys.exit(0)
+except Exception as e:
+    print("    python3: fallo ->", e)
+    sys.exit(1)
+PYCODE
+    then
+      return 0
+    else
+      echo "    python3 fallo (intentando python2)..."
+    fi
+  fi
+
+  # Try python (python2)
+  if _cmd_exists python; then
+    echo "    Usando python (2.x) para descargar..."
+    if python - <<PYCODE
+import sys, urllib
+url = "$url"
+dest = "$dest"
+try:
+    urllib.urlretrieve(url, dest)
+    print("    python: descarga completada")
+    sys.exit(0)
+except Exception as e:
+    print("    python: fallo ->", e)
+    sys.exit(1)
+PYCODE
+    then
+      return 0
+    else
+      echo "    python (2.x) falló."
+    fi
+  fi
+
+  # If we reach here, no method worked
+  echo "ERROR: No se pudo descargar el archivo. Asegúrate de tener wget o curl o python instalado y acceso a Internet."
+  return 1
+}
+
+# =========================
 # Privilegios root
-# --------------------------
+# =========================
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: este script requiere privilegios de root."
   echo "Ejecuta: sudo $0"
@@ -55,14 +131,14 @@ ORIGINAL_UID=$(id -u "$ORIGINAL_USER" 2>/dev/null || echo 1000)
 ORIGINAL_GID=$(id -g "$ORIGINAL_USER" 2>/dev/null || echo 1000)
 
 echo "=========================================="
-echo "  Blockheads Installer (interactivo)"
+echo "  Blockheads Installer (interactivo - robusto)"
 echo "=========================================="
 echo "Usuario que ejecutó sudo: $ORIGINAL_USER"
 echo
 
-# --------------------------
+# =========================
 # Preguntas al usuario
-# --------------------------
+# =========================
 read -rp "Directorio donde instalar (enter = carpeta actual): " INSTALL_DIR
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 mkdir -p "$INSTALL_DIR"
@@ -89,9 +165,9 @@ if ! prompt_yesno "¿Continuar con la instalación?" "Y"; then
   exit 0
 fi
 
-# --------------------------
+# =========================
 # Preparación
-# --------------------------
+# =========================
 TEMP_DIR=$(mktemp -d)
 TEMP_FILE="$TEMP_DIR/blockheads_server171.tar.gz"
 cd "$INSTALL_DIR"
@@ -111,7 +187,7 @@ if [ ${#tools_missing[@]} -gt 0 ]; then
     if prompt_yesno "¿Deseas que el script intente instalar dependencias con apt-get?" "Y"; then
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -y
-      apt-get install -y --no-install-recommends "${tools_missing[@]}" >/dev/null || true
+      apt-get install -y --no-install-recommends "${tools_missing[@]}" || true
     else
       echo "Continúo sin instalar dependencias. Asegúrate manualmente de instalarlas si hay errores."
     fi
@@ -122,21 +198,26 @@ else
   echo "Todas las utilidades necesarias están disponibles."
 fi
 
-# --------------------------
-# Descargar
-# --------------------------
+# =========================
+# Descargar (2/6) - robusto
+# =========================
 echo
-echo "[2/6] Descargando servidor desde: $SERVER_URL"
-if _cmd_exists wget; then
-  wget -q "$SERVER_URL" -O "$TEMP_FILE" || { echo "ERROR: fallo al descargar con wget"; exit 1; }
-elif _cmd_exists curl; then
-  curl -sSL "$SERVER_URL" -o "$TEMP_FILE" || { echo "ERROR: fallo al descargar con curl"; exit 1; }
+echo "[2/6] Descargando servidor..."
+if download_file "$SERVER_URL" "$TEMP_FILE"; then
+  echo "Descarga completada: $TEMP_FILE"
 else
-  echo "ERROR: ni wget ni curl están disponibles."
+  echo "ERROR: fallo en la descarga. Revisa la URL o la conectividad de red."
+  echo "  URL: $SERVER_URL"
+  echo "  Archivo destino: $TEMP_FILE"
+  echo "  Comprueba si dispones de wget/curl/python y acceso a Internet."
+  # limpieza temporal
+  rm -rf "$TEMP_DIR" || true
   exit 1
 fi
 
-# Comprobar tipo archivo (mejor detección)
+# =========================
+# Verificación rápida del archivo descargado (opcional)
+# =========================
 if _cmd_exists file; then
   mime=$(file --mime-type -b "$TEMP_FILE" || echo "")
   if ! echo "$mime" | grep -q -E "gzip|x-gzip|x-tar"; then
@@ -144,12 +225,17 @@ if _cmd_exists file; then
   fi
 fi
 
-# --------------------------
-# Extraer
-# --------------------------
+# =========================
+# Extraer (3/6)
+# =========================
 echo
 echo "[3/6] Extrayendo en: $INSTALL_DIR"
-tar xzf "$TEMP_FILE" -C "$INSTALL_DIR" || { echo "ERROR: extracción fallida"; exit 1; }
+if ! tar xzf "$TEMP_FILE" -C "$INSTALL_DIR"; then
+  echo "ERROR: extracción fallida. Mostrando contenido del tar (si es posible):"
+  tar tzf "$TEMP_FILE" || true
+  rm -rf "$TEMP_DIR" || true
+  exit 1
+fi
 
 SERVER_BINARY="$INSTALL_DIR/blockheads_server171"
 if [ ! -f "$SERVER_BINARY" ]; then
@@ -163,15 +249,16 @@ fi
 if [ ! -f "$SERVER_BINARY" ]; then
   echo "ERROR: No se encontró blockheads_server171 después de extraer. Verifica el contenido del tarball."
   ls -la "$INSTALL_DIR"
+  rm -rf "$TEMP_DIR" || true
   exit 1
 fi
 
 chmod +x "$SERVER_BINARY"
 cp -p "$SERVER_BINARY" "${SERVER_BINARY}.orig" 2>/dev/null || true
 
-# --------------------------
-# Patching con patchelf (opcional)
-# --------------------------
+# =========================
+# Patching con patchelf (4/6) - opcional
+# =========================
 echo
 echo "[4/6] Intentando parchar dependencias (patchelf si está instalado)..."
 if _cmd_exists patchelf; then
@@ -202,9 +289,9 @@ else
   echo "patchelf no está instalado. Si ves errores por librerías faltantes instala patchelf y vuelve a intentar."
 fi
 
-# --------------------------
-# Crear start.sh personalizado
-# --------------------------
+# =========================
+# Crear start.sh (5/6)
+# =========================
 echo
 echo "[5/6] Creando start.sh amigable en: $INSTALL_DIR/start.sh"
 
@@ -236,7 +323,6 @@ Opciones:
 EOF
 }
 
-# Parse args simples
 NO_RESTART=false
 while [ \$# -gt 0 ]; do
   case "\$1" in
@@ -305,9 +391,9 @@ START_SH
 chmod 755 "$INSTALL_DIR/start.sh"
 chown "$ORIGINAL_UID:$ORIGINAL_GID" "$INSTALL_DIR/start.sh" "$SERVER_BINARY" || true
 
-# --------------------------
-# Preguntar si crear servicio systemd (opcional)
-# --------------------------
+# =========================
+# systemd opcional
+# =========================
 echo
 if _cmd_exists systemctl && prompt_yesno "¿Deseas que cree un servicio systemd para gestionar el servidor automáticamente (arranque, logs, start/stop)?" "Y"; then
   SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME"
@@ -336,7 +422,7 @@ SERVICE
   systemctl enable "$SERVICE_NAME" || true
   echo "Servicio systemd creado en $SERVICE_FILE y habilitado (no iniciado aún)."
   if prompt_yesno "¿Iniciar el servicio ahora?" "Y"; then
-    systemctl start "$SERVICE_NAME"
+    systemctl start "$SERVICE_NAME" || true
     echo "Servicio iniciado. Comprueba estado con: sudo systemctl status $SERVICE_NAME"
   else
     echo "Puedes iniciar el servicio más tarde con: sudo systemctl start $SERVICE_NAME"
@@ -345,9 +431,9 @@ else
   echo "Se omite la creación de servicio systemd."
 fi
 
-# --------------------------
-# Limpieza y verificación final
-# --------------------------
+# =========================
+# Limpieza y verificación final (6/6)
+# =========================
 rm -rf "$TEMP_DIR" || true
 
 echo
@@ -359,7 +445,7 @@ echo "  Inicia el servidor con: $INSTALL_DIR/start.sh"
 echo "  O si creaste el servicio: sudo systemctl start $SERVICE_NAME"
 echo
 echo "Ver logs en tiempo real:"
-echo "  - Si usas start.sh: verás salida por pantalla (y además se guarda en ~/.*/console.log)."
+echo "  - Si usas start.sh: verás salida por pantalla (y además se guarda en ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/<world_id>/console.log)."
 echo "  - Si usas systemd: sudo journalctl -u $SERVICE_NAME -f"
 echo
 echo "Consejos:"
