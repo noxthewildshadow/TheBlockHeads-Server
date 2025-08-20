@@ -116,6 +116,7 @@ cat > bot_server.sh << 'EOF'
 
 # Bot configuration
 ECONOMY_FILE="economy_data.json"
+PIPE_FILE="server_pipe"
 SCAN_INTERVAL=5
 
 # Initialize economy data file if it doesn't exist
@@ -123,6 +124,14 @@ initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
         echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
         echo "Economy data file created."
+    fi
+}
+
+# Create named pipe for server communication
+create_pipe() {
+    if [ ! -p "$PIPE_FILE" ]; then
+        mkfifo "$PIPE_FILE"
+        echo "Created named pipe for server communication: $PIPE_FILE"
     fi
 }
 
@@ -171,11 +180,11 @@ grant_login_ticket() {
     fi
 }
 
-# Send command to server
+# Send command to server via named pipe
 send_server_command() {
     local command="$1"
-    # This uses screen to send commands to the server
-    screen -S blockheads -X stuff "$command$(printf \\r)"
+    echo "$command" > "$PIPE_FILE" &
+    echo "Sent command to server: $command"
 }
 
 # Process player message
@@ -271,7 +280,18 @@ monitor_log() {
     echo "Starting economy bot. Monitoring: $log_file"
     echo "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
     echo "Admin commands: !send_ticket <player> <amount>"
+    echo "To send commands to server, type them and press Enter:"
     
+    # Start reading from stdin for admin commands
+    while read -r admin_command; do
+        if [[ "$admin_command" == "!send_ticket "* ]]; then
+            process_admin_command "$admin_command"
+        else
+            echo "Unknown admin command. Use: !send_ticket <player> <amount>"
+        fi
+    done &
+    
+    # Monitor log file for player activity
     tail -n 0 -F "$log_file" | while read line; do
         # Detect player connections
         if [[ "$line" =~ ([a-zA-Z0-9_]+)\ connected\.$ ]]; then
@@ -289,23 +309,18 @@ monitor_log() {
             add_player_if_new "$player_name"
             process_message "$player_name" "$message"
         fi
-        
-        # Detect admin commands from console
-        if [[ "$line" =~ Console:\ (!send_ticket\ [a-zA-Z0-9_]+\ [0-9]+)$ ]]; then
-            local admin_command="${BASH_REMATCH[1]}"
-            echo "Admin command: $admin_command"
-            process_admin_command "$admin_command"
-        fi
     done
 }
 
 # Main execution
 if [ $# -eq 1 ]; then
     initialize_economy
+    create_pipe
     monitor_log "$1"
 else
     echo "Usage: $0 <server_log_file>"
     echo "Please provide the path to the server log file"
+    echo "Example: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/83cad395edb8d0f1912fec89508d8a1d/console.log"
     exit 1
 fi
 EOF
@@ -324,14 +339,22 @@ rm -f "$TEMP_FILE"
 echo "================================================================"
 echo "Installation completed successfully"
 echo "================================================================"
+echo "To see server commands: ./blockheads_server171 --help"
 echo "To start the server run: ./start.sh"
 echo "To start the economy bot run: ./bot_server.sh <path_to_log_file>"
+echo ""
+echo "Example for bot: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/83cad395edb8d0f1912fec89508d8a1d/console.log"
 echo ""
 echo "The economy bot features:"
 echo "- Players get 1 ticket every hour when they connect"
 echo "- Commands: !tickets, !buy_mod (10), !buy_admin (20)"
 echo "- Admin commands: !send_ticket <player> <amount>"
 echo "- Economy data saved in: economy_data.json"
+echo ""
+echo "Important: For the bot to work properly, you need to:"
+echo "1. Start the server first: ./start.sh"
+echo "2. In a new terminal, start the bot with the correct log file path"
+echo "3. To send admin commands, type them in the bot terminal"
 echo ""
 echo "Verifying executable..."
 if sudo -u "$ORIGINAL_USER" ./blockheads_server171 --help > /dev/null 2>&1; then
