@@ -85,16 +85,28 @@ echo "Logs: \$log_file"
 echo "Use Ctrl+C to stop the server"
 echo "----------------------------------------"
 
+# Function to clean up on exit
+cleanup() {
+    echo ""
+    echo "Server stopped. Logs saved to: \$log_file"
+    exit 0
+}
+
+trap cleanup INT TERM
+
 restart_count=0
 while true; do
     restart_count=\$((restart_count + 1))
     timestamp=\$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[\$timestamp] Starting server (restart #\$restart_count)" >> "\$log_file"
-    \$server_binary -o "\$world_id" -p "\$server_port" >> "\$log_file" 2>&1
-    exit_code=\$?
+    echo "[\$timestamp] Starting server (restart #\$restart_count)" | tee -a "\$log_file"
+    
+    # Run server with real-time log output
+    \$server_binary -o "\$world_id" -p "\$server_port" 2>&1 | tee -a "\$log_file"
+    
+    exit_code=\${PIPESTATUS[0]}
     timestamp=\$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[\$timestamp] Server closed (exit code: \$exit_code), restarting in 1s..." >> "\$log_file"
-    sleep 1
+    echo "[\$timestamp] Server closed (exit code: \$exit_code), restarting in 3s..." | tee -a "\$log_file"
+    sleep 3
 done
 EOF
 
