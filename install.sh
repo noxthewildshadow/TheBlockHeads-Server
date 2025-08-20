@@ -10,7 +10,7 @@ fi
 
 # Configuración de variables
 SERVER_URL="https://r2.theblockheads.xyz/server/blockheads_server171.tar.gz"
-START_SCRIPT_URL="https://gitlab.com/theblockheads/linux-server/-/raw/main/start.sh"
+START_SCRIPT_URL="https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server/refs/heads/main/start.sh"
 TEMP_FILE="/tmp/blockheads_server171.tar.gz"
 SERVER_BINARY="blockheads_server171"
 
