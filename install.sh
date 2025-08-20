@@ -26,7 +26,7 @@ echo "[1/6] Installing required packages..."
 {
     add-apt-repository multiverse -y
     apt-get update -y
-    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq
+    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen
 } > /dev/null 2>&1
 
 echo "[2/6] Downloading server..."
@@ -116,7 +116,6 @@ cat > bot_server.sh << 'EOF'
 
 # Bot configuration
 ECONOMY_FILE="economy_data.json"
-PIPE_FILE="server_pipe"
 SCAN_INTERVAL=5
 
 # Initialize economy data file if it doesn't exist
@@ -124,14 +123,6 @@ initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
         echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
         echo "Economy data file created."
-    fi
-}
-
-# Create named pipe for server communication
-create_pipe() {
-    if [ ! -p "$PIPE_FILE" ]; then
-        mkfifo "$PIPE_FILE"
-        echo "Created named pipe for server communication: $PIPE_FILE"
     fi
 }
 
@@ -180,11 +171,17 @@ grant_login_ticket() {
     fi
 }
 
-# Send command to server via named pipe
+# Send command to server using screen
 send_server_command() {
     local command="$1"
-    echo "$command" > "$PIPE_FILE" &
-    echo "Sent command to server: $command"
+    
+    # Try to send command via screen
+    if screen -S blockheads -X stuff "$command$(printf \\r)" 2>/dev/null; then
+        echo "Sent command to server: $command"
+    else
+        echo "Error: Could not send command to server. Is the server running in a screen session named 'blockheads'?"
+        echo "Start the server with: screen -S blockheads -d -m ./start.sh"
+    fi
 }
 
 # Process player message
@@ -315,7 +312,6 @@ monitor_log() {
 # Main execution
 if [ $# -eq 1 ]; then
     initialize_economy
-    create_pipe
     monitor_log "$1"
 else
     echo "Usage: $0 <server_log_file>"
@@ -340,7 +336,10 @@ echo "================================================================"
 echo "Installation completed successfully"
 echo "================================================================"
 echo "To see server commands: ./blockheads_server171 --help"
-echo "To start the server run: ./start.sh"
+echo "To start the server run: screen -S blockheads -d -m ./start.sh"
+echo "To attach to server console: screen -r blockheads"
+echo "To detach from console: Ctrl+A then D"
+echo ""
 echo "To start the economy bot run: ./bot_server.sh <path_to_log_file>"
 echo ""
 echo "Example for bot: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/83cad395edb8d0f1912fec89508d8a1d/console.log"
@@ -351,8 +350,8 @@ echo "- Commands: !tickets, !buy_mod (10), !buy_admin (20)"
 echo "- Admin commands: !send_ticket <player> <amount>"
 echo "- Economy data saved in: economy_data.json"
 echo ""
-echo "Important: For the bot to work properly, you need to:"
-echo "1. Start the server first: ./start.sh"
+echo "IMPORTANT: For the bot to work properly, you MUST:"
+echo "1. Start the server in a screen session: screen -S blockheads -d -m ./start.sh"
 echo "2. In a new terminal, start the bot with the correct log file path"
 echo "3. To send admin commands, type them in the bot terminal"
 echo ""
