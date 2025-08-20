@@ -136,7 +136,29 @@ add_player_if_new() {
         current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_help_time": 0}')
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Added new player: $player_name"
+        
+        # Give first-time bonus
+        give_first_time_bonus "$player_name"
     fi
+}
+
+# Give first-time bonus to new players
+give_first_time_bonus() {
+    local player_name="$1"
+    local current_data=$(cat "$ECONOMY_FILE")
+    local current_time=$(date +%s)
+    
+    # Give 1 ticket to new player
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets = 1')
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
+    
+    # Add transaction record
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
+        '.transactions += [{"player": $player, "type": "first_time_bonus", "tickets": 1, "time": $time}]')
+    
+    echo "$current_data" > "$ECONOMY_FILE"
+    echo "Gave first-time bonus to $player_name"
+    send_server_command "say Welcome $player_name! You received 1 ticket as a first-time bonus. Type !economy_help for info."
 }
 
 # Grant login ticket (once per hour)
@@ -151,9 +173,13 @@ grant_login_ticket() {
     # Check if enough time has passed (1 hour = 3600 seconds)
     if [ "$last_login" -eq 0 ] || [ $((current_time - last_login)) -ge 3600 ]; then
         # Grant ticket
-        local new_tickets=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets + 1')
+        local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
+        local new_tickets=$((current_tickets + 1))
+        
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
+            '.players[$player].tickets = $tickets')
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" \
-            '.players[$player].tickets = $new_tickets | .players[$player].last_login = $time')
+            '.players[$player].last_login = $time')
         
         # Add transaction record
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
@@ -288,6 +314,19 @@ process_admin_command() {
     fi
 }
 
+# Filter out server restart messages
+filter_server_log() {
+    while read line; do
+        # Skip lines with server restart messages
+        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
+            continue
+        fi
+        
+        # Output only relevant lines
+        echo "$line"
+    done
+}
+
 # Monitor server log
 monitor_log() {
     local log_file="$1"
@@ -306,7 +345,7 @@ monitor_log() {
     done &
     
     # Monitor log file for player activity
-    tail -n 0 -F "$log_file" | while read line; do
+    tail -n 0 -F "$log_file" | filter_server_log | while read line; do
         # Detect player connections
         if [[ "$line" =~ ([a-zA-Z0-9_]+)\ connected\.$ ]]; then
             local player_name="${BASH_REMATCH[1]}"
@@ -314,6 +353,7 @@ monitor_log() {
             add_player_if_new "$player_name"
             grant_login_ticket "$player_name"
             show_help_if_needed "$player_name"
+            continue
         fi
         
         # Detect player messages
@@ -323,7 +363,10 @@ monitor_log() {
             echo "Chat: $player_name: $message"
             add_player_if_new "$player_name"
             process_message "$player_name" "$message"
+            continue
         fi
+        
+        echo "Other log line: $line"
     done
 }
 
