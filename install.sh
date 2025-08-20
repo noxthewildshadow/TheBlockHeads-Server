@@ -1,454 +1,377 @@
-#!/usr/bin/env bash
-#
+#!/bin/bash
+# ======================================================
 # blockheads_installer_interactive.sh
-# Instalador interactivo y amigable para The Blockheads server (blockheads_server171)
-#
-# Uso:
-#   sudo ./blockheads_installer_interactive.sh
-#
-set -euo pipefail
+# An intuitive, beginner-friendly installer and configurator
+# for The Blockheads Linux server (blockheads_server171).
+# - Interactive prompts with sensible defaults
+# - Non-interactive mode for automation (--yes)
+# - Cross-distro package checks (apt/yum/dnf/pacman)
+# - Optional dedicated system user 'blockheads'
+# - Optional systemd service installation and enablement
+# - UFW firewall detection & optional port opening
+# - Log rotation config and daily backups script
+# - Robust error handling and clear, step-by-step output
+# ======================================================
 
-# =========================
-# Valores por defecto
-# =========================
-DEFAULT_SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
-DEFAULT_INSTALL_DIR="$(pwd)"
+set -euo pipefail
+trap 'rc=$?; [ $rc -ne 0 ] && echo "Installer exited with code $rc"; exit $rc' EXIT
+
+# -------------------------
+# Defaults
+# -------------------------
+DEFAULT_INSTALL_DIR="/opt/blockheads"
 DEFAULT_WORLD_ID="83cad395edb8d0f1912fec89508d8a1d"
 DEFAULT_PORT=15151
-SERVICE_NAME="blockheads.service"
+DEFAULT_SERVICE_NAME="blockheads"
+SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
+TARBALL_NAME="blockheads_server171.tar.gz"
+BINARY_NAME="blockheads_server171"
 
-# =========================
+# -------------------------
 # Helpers
-# =========================
-_cmd_exists() { command -v "$1" >/dev/null 2>&1; }
+# -------------------------
+_info(){ printf "\e[32m[INFO]\e[0m %s\n" "$*"; }
+_warn(){ printf "\e[33m[WARN]\e[0m %s\n" "$*"; }
+_err(){ printf "\e[31m[ERROR]\e[0m %s\n" "$*"; }
 
-prompt_yesno() {
-  local prompt="${1:-Continue?}"
-  local default="${2:-Y}" # Y or N
-  local ans
-  while true; do
-    if [ "$default" = "Y" ]; then
-      read -rp "$prompt [Y/n]: " ans
-      ans="${ans:-Y}"
-    else
-      read -rp "$prompt [y/N]: " ans
-      ans="${ans:-N}"
-    fi
-    case "${ans,,}" in
-      y|yes) return 0;;
-      n|no) return 1;;
-      *) echo "Por favor responde 'y' o 'n'.";;
+_cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
+
+prompt_yesno(){ # prompt_yesno "Question" default_yes(true/false)
+    local question="$1"; local default_yes=${2:-true}
+    local def_label
+    if $default_yes; then def_label="Y/n"; else def_label="y/N"; fi
+    while true; do
+        read -r -p "$question [$def_label]: " ans || true
+        if [ -z "$ans" ]; then
+            $default_yes && return 0 || return 1
+        fi
+        case "$ans" in
+            [Yy]* ) return 0 ;; [Nn]* ) return 1 ;;
+            * ) echo "Please answer yes or no." ;;
+        esac
+    done
+}
+
+read_with_default(){ # read_with_default varname prompt default
+    local varname="$1"; local prompt="$2"; local default_val="$3"
+    read -r -p "$prompt [$default_val]: " val || true
+    if [ -z "$val" ]; then val="$default_val"; fi
+    printf -v "$varname" "%s" "$val"
+}
+
+# -------------------------
+# Parse args
+# -------------------------
+NONINTERACTIVE=false
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --yes|-y) NONINTERACTIVE=true; shift ;;
+        --help|-h) echo "Usage: $0 [--yes]"; exit 0 ;;
+        *) echo "Unknown arg: $1"; exit 1 ;;
     esac
-  done
-}
+done
 
-# Robust download function with fallbacks and informative errors
-download_file() {
-  local url="$1"
-  local dest="$2"
-
-  echo "  Intentando descargar: $url"
-  # Try wget (prefer retry and failfast)
-  if _cmd_exists wget; then
-    echo "    Usando wget..."
-    if wget --tries=3 --timeout=20 -O "$dest" "$url"; then
-      return 0
-    else
-      echo "    wget falló (intentando otros métodos)..."
-    fi
-  fi
-
-  # Try curl
-  if _cmd_exists curl; then
-    echo "    Usando curl..."
-    if curl -fSL --retry 3 --retry-delay 2 -o "$dest" "$url"; then
-      return 0
-    else
-      echo "    curl falló (intentando otros métodos)..."
-    fi
-  fi
-
-  # Try python3
-  if _cmd_exists python3; then
-    echo "    Usando python3 para descargar..."
-    if python3 - <<PYCODE
-import sys, urllib.request
-url = "$url"
-dest = "$dest"
-try:
-    urllib.request.urlretrieve(url, dest)
-    print("    python3: descarga completada")
-    sys.exit(0)
-except Exception as e:
-    print("    python3: fallo ->", e)
-    sys.exit(1)
-PYCODE
-    then
-      return 0
-    else
-      echo "    python3 fallo (intentando python2)..."
-    fi
-  fi
-
-  # Try python (python2)
-  if _cmd_exists python; then
-    echo "    Usando python (2.x) para descargar..."
-    if python - <<PYCODE
-import sys, urllib
-url = "$url"
-dest = "$dest"
-try:
-    urllib.urlretrieve(url, dest)
-    print("    python: descarga completada")
-    sys.exit(0)
-except Exception as e:
-    print("    python: fallo ->", e)
-    sys.exit(1)
-PYCODE
-    then
-      return 0
-    else
-      echo "    python (2.x) falló."
-    fi
-  fi
-
-  # If we reach here, no method worked
-  echo "ERROR: No se pudo descargar el archivo. Asegúrate de tener wget o curl o python instalado y acceso a Internet."
-  return 1
-}
-
-# =========================
-# Privilegios root
-# =========================
-if [ "$(id -u)" -ne 0 ]; then
-  echo "ERROR: este script requiere privilegios de root."
-  echo "Ejecuta: sudo $0"
-  exit 1
+# -------------------------
+# Confirm root
+# -------------------------
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    _err "This installer requires root privileges. Run with: sudo $0"
+    exit 1
 fi
 
-ORIGINAL_USER="${SUDO_USER:-${USER:-root}}"
-ORIGINAL_UID=$(id -u "$ORIGINAL_USER" 2>/dev/null || echo 1000)
-ORIGINAL_GID=$(id -g "$ORIGINAL_USER" 2>/dev/null || echo 1000)
+ORIGINAL_USER=${SUDO_USER:-${USER:-root}}
+_info "Installer running as root. Original user: $ORIGINAL_USER"
 
-echo "=========================================="
-echo "  Blockheads Installer (interactivo - robusto)"
-echo "=========================================="
-echo "Usuario que ejecutó sudo: $ORIGINAL_USER"
-echo
+# -------------------------
+# Gather configuration (interactive unless --yes)
+# -------------------------
+if ! $NONINTERACTIVE; then
+    echo -e "\nWelcome to The Blockheads Server installer! I'll guide you step-by-step.\n"
+    read_with_default INSTALL_DIR "Installation directory" "$DEFAULT_INSTALL_DIR"
+    read_with_default WORLD_ID "World ID (identifier for your world)" "$DEFAULT_WORLD_ID"
+    read_with_default SERVER_PORT "Server port" "$DEFAULT_PORT"
 
-# =========================
-# Preguntas al usuario
-# =========================
-read -rp "Directorio donde instalar (enter = carpeta actual): " INSTALL_DIR
-INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
-mkdir -p "$INSTALL_DIR"
+    prompt_yesno "Create a dedicated system user 'blockheads' to run the server (recommended)" true
+    CREATE_SYSTEM_USER=$?
 
-read -rp "URL del paquete del servidor (enter = predeterminada): " SERVER_URL
-SERVER_URL="${SERVER_URL:-$DEFAULT_SERVER_URL}"
+    prompt_yesno "Install and enable a systemd service to run the server automatically" true
+    INSTALL_SYSTEMD=$?
 
-read -rp "World ID (enter = $DEFAULT_WORLD_ID): " WORLD_ID
-WORLD_ID="${WORLD_ID:-$DEFAULT_WORLD_ID}"
+    prompt_yesno "Open firewall port $SERVER_PORT with UFW (if installed)" true
+    OPEN_FIREWALL=$?
 
-read -rp "Puerto del servidor (enter = $DEFAULT_PORT): " SERVER_PORT
-SERVER_PORT="${SERVER_PORT:-$DEFAULT_PORT}"
+    prompt_yesno "Enable daily automatic backups (creates a cron job)" true
+    ENABLE_BACKUPS=$?
+else
+    INSTALL_DIR="$DEFAULT_INSTALL_DIR"
+    WORLD_ID="$DEFAULT_WORLD_ID"
+    SERVER_PORT="$DEFAULT_PORT"
+    CREATE_SYSTEM_USER=0
+    INSTALL_SYSTEMD=0
+    OPEN_FIREWALL=0
+    ENABLE_BACKUPS=0
+    _info "Running non-interactively with defaults. Use --help for options."
+fi
 
-echo
-echo "Resumen:"
-echo "  Carpeta de instalación: $INSTALL_DIR"
-echo "  URL del servidor: $SERVER_URL"
+_info "Summary of choices:"
+echo "  Install dir: $INSTALL_DIR"
 echo "  World ID: $WORLD_ID"
-echo "  Puerto: $SERVER_PORT"
-echo
+echo "  Port: $SERVER_PORT"
+echo "  Create system user: $([ $CREATE_SYSTEM_USER -eq 0 ] && echo Yes || echo No)"
+echo "  Install systemd: $([ $INSTALL_SYSTEMD -eq 0 ] && echo Yes || echo No)"
+echo "  Open firewall: $([ $OPEN_FIREWALL -eq 0 ] && echo Yes || echo No)"
+echo "  Enable backups: $([ $ENABLE_BACKUPS -eq 0 ] && echo Yes || echo No)"
 
-if ! prompt_yesno "¿Continuar con la instalación?" "Y"; then
-  echo "Cancelado por el usuario."
-  exit 0
+if ! $NONINTERACTIVE; then
+    prompt_yesno "Proceed with the installation?" true || { _info "Aborted by user."; exit 0; }
 fi
 
-# =========================
-# Preparación
-# =========================
-TEMP_DIR=$(mktemp -d)
-TEMP_FILE="$TEMP_DIR/blockheads_server171.tar.gz"
+# -------------------------
+# Prepare install dir
+# -------------------------
+mkdir -p "$INSTALL_DIR"
+chown "$ORIGINAL_USER":"$ORIGINAL_USER" "$INSTALL_DIR"
+chmod 755 "$INSTALL_DIR"
 cd "$INSTALL_DIR"
+_info "Working in $INSTALL_DIR"
 
-echo
-echo "[1/6] Comprobando herramientas necesarias..."
-tools_missing=()
-for t in wget curl tar file; do
-  if ! _cmd_exists "$t"; then
-    tools_missing+=("$t")
-  fi
-done
-
-if [ ${#tools_missing[@]} -gt 0 ]; then
-  echo "Nota: faltan algunas utilidades: ${tools_missing[*]}"
-  if _cmd_exists apt-get; then
-    if prompt_yesno "¿Deseas que el script intente instalar dependencias con apt-get?" "Y"; then
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -y
-      apt-get install -y --no-install-recommends "${tools_missing[@]}" || true
+# -------------------------
+# Install helper packages per distro if possible
+# -------------------------
+install_pkg_list(){
+    local pkgs=("wget" "curl" "tar" "file")
+    if _cmd_exists apt-get; then
+        _info "Using apt to install helper packages (if missing)..."
+        apt-get update -y >/dev/null
+        apt-get install -y "${pkgs[@]}" >/dev/null || true
+    elif _cmd_exists yum || _cmd_exists dnf; then
+        _info "Using yum/dnf to install helper packages (if missing)..."
+        if _cmd_exists dnf; then dnf install -y "${pkgs[@]}" >/dev/null || true; else yum install -y "${pkgs[@]}" >/dev/null || true; fi
+    elif _cmd_exists pacman; then
+        _info "Using pacman to install helper packages (if missing)..."
+        pacman -Sy --noconfirm "${pkgs[@]}" >/dev/null || true
     else
-      echo "Continúo sin instalar dependencias. Asegúrate manualmente de instalarlas si hay errores."
+        _warn "Could not detect package manager. Please ensure wget/curl/tar/file are installed."
     fi
-  else
-    echo "No hay apt-get disponible. Instala manualmente: ${tools_missing[*]}"
-  fi
+}
+install_pkg_list
+
+# -------------------------
+# Download and extract
+# -------------------------
+TMPDIR=$(mktemp -d)
+TARBALL_PATH="$TMPDIR/$TARBALL_NAME"
+_info "Downloading server archive..."
+if _cmd_exists wget; then
+    wget -q "$SERVER_URL" -O "$TARBALL_PATH" || { _err "Download failed"; exit 1; }
+elif _cmd_exists curl; then
+    curl -sSL "$SERVER_URL" -o "$TARBALL_PATH" || { _err "Download failed"; exit 1; }
 else
-  echo "Todas las utilidades necesarias están disponibles."
+    _err "Neither wget nor curl is available. Install one and retry."
+    exit 1
 fi
 
-# =========================
-# Descargar (2/6) - robusto
-# =========================
-echo
-echo "[2/6] Descargando servidor..."
-if download_file "$SERVER_URL" "$TEMP_FILE"; then
-  echo "Descarga completada: $TEMP_FILE"
+_info "Extracting archive..."
+if tar xzf "$TARBALL_PATH" -C "$INSTALL_DIR"; then
+    _info "Extraction complete."
 else
-  echo "ERROR: fallo en la descarga. Revisa la URL o la conectividad de red."
-  echo "  URL: $SERVER_URL"
-  echo "  Archivo destino: $TEMP_FILE"
-  echo "  Comprueba si dispones de wget/curl/python y acceso a Internet."
-  # limpieza temporal
-  rm -rf "$TEMP_DIR" || true
-  exit 1
+    _err "Extraction failed. Tarball may be corrupted."; exit 1
 fi
 
-# =========================
-# Verificación rápida del archivo descargado (opcional)
-# =========================
-if _cmd_exists file; then
-  mime=$(file --mime-type -b "$TEMP_FILE" || echo "")
-  if ! echo "$mime" | grep -q -E "gzip|x-gzip|x-tar"; then
-    echo "Advertencia: el archivo descargado no parece un tar.gz (mime: $mime). La extracción puede fallar."
-  fi
+# Ensure binary exists
+if [ ! -f "$INSTALL_DIR/$BINARY_NAME" ]; then
+    _err "Binary $BINARY_NAME not found in $INSTALL_DIR after extraction."; exit 1
+fi
+chmod +x "$INSTALL_DIR/$BINARY_NAME"
+cp -n "$INSTALL_DIR/$BINARY_NAME" "$INSTALL_DIR/${BINARY_NAME}.orig" || true
+
+# -------------------------
+# Optional: create system user
+# -------------------------
+if [ $CREATE_SYSTEM_USER -eq 0 ]; then
+    if id -u blockheads >/dev/null 2>&1; then
+        _info "System user 'blockheads' already exists. Using existing user."
+    else
+        _info "Creating system user 'blockheads' (no shell, system account)..."
+        useradd --system --no-create-home --shell /usr/sbin/nologin blockheads || true
+    fi
+    chown -R blockheads:blockheads "$INSTALL_DIR"
+else
+    chown -R "$ORIGINAL_USER":"$ORIGINAL_USER" "$INSTALL_DIR"
 fi
 
-# =========================
-# Extraer (3/6)
-# =========================
-echo
-echo "[3/6] Extrayendo en: $INSTALL_DIR"
-if ! tar xzf "$TEMP_FILE" -C "$INSTALL_DIR"; then
-  echo "ERROR: extracción fallida. Mostrando contenido del tar (si es posible):"
-  tar tzf "$TEMP_FILE" || true
-  rm -rf "$TEMP_DIR" || true
-  exit 1
-fi
-
-SERVER_BINARY="$INSTALL_DIR/blockheads_server171"
-if [ ! -f "$SERVER_BINARY" ]; then
-  # Buscar binarios extraídos por si vienen en subcarpeta
-  maybe=$(find "$INSTALL_DIR" -maxdepth 2 -type f -name 'blockheads_server*' -print -quit || true)
-  if [ -n "$maybe" ]; then
-    SERVER_BINARY="$maybe"
-  fi
-fi
-
-if [ ! -f "$SERVER_BINARY" ]; then
-  echo "ERROR: No se encontró blockheads_server171 después de extraer. Verifica el contenido del tarball."
-  ls -la "$INSTALL_DIR"
-  rm -rf "$TEMP_DIR" || true
-  exit 1
-fi
-
-chmod +x "$SERVER_BINARY"
-cp -p "$SERVER_BINARY" "${SERVER_BINARY}.orig" 2>/dev/null || true
-
-# =========================
-# Patching con patchelf (4/6) - opcional
-# =========================
-echo
-echo "[4/6] Intentando parchar dependencias (patchelf si está instalado)..."
+# -------------------------
+# Patching (patchelf) if present
+# -------------------------
 if _cmd_exists patchelf; then
-  replacements=(
-    "libgnustep-base.so.1.24:libgnustep-base.so.1.28"
-    "libobjc.so.4.6:libobjc.so.4"
-    "libgnutls.so.26:libgnutls.so.30"
-    "libgcrypt.so.11:libgcrypt.so.20"
-    "libffi.so.6:libffi.so.8"
-    "libicui18n.so.48:libicui18n.so.70"
-    "libicuuc.so.48:libicuuc.so.70"
-    "libicudata.so.48:libicudata.so.70"
-    "libdispatch.so:libdispatch.so.0"
-  )
-  for pair in "${replacements[@]}"; do
-    oldlib=${pair%%:*}
-    newlib=${pair##*:}
-    if patchelf --print-needed "$SERVER_BINARY" 2>/dev/null | grep -q "$oldlib"; then
-      echo "  Patching $oldlib -> $newlib"
-      if patchelf --replace-needed "$oldlib" "$newlib" "$SERVER_BINARY" 2>/dev/null; then
-        echo "    OK"
-      else
-        echo "    Advertencia: fallo al aplicar patchelf para $oldlib -> $newlib (se continúa)"
-      fi
-    fi
-  done
+    _info "patchelf found — attempting to patch common missing libs if needed..."
+    replacements=(
+        "libgnustep-base.so.1.24:libgnustep-base.so.1.28"
+        "libobjc.so.4.6:libobjc.so.4"
+        "libgnutls.so.26:libgnutls.so.30"
+        "libgcrypt.so.11:libgcrypt.so.20"
+        "libffi.so.6:libffi.so.8"
+        "libicui18n.so.48:libicui18n.so.70"
+        "libicuuc.so.48:libicuuc.so.70"
+        "libicudata.so.48:libicudata.so.70"
+        "libdispatch.so:libdispatch.so.0"
+    )
+    for pair in "${replacements[@]}"; do
+        old=${pair%%:*}; new=${pair##*:}
+        if patchelf --print-needed "$INSTALL_DIR/$BINARY_NAME" 2>/dev/null | grep -q "$old"; then
+            _info "Patching $old -> $new"
+            if ! patchelf --replace-needed "$old" "$new" "$INSTALL_DIR/$BINARY_NAME" 2>/dev/null; then
+                _warn "patchelf failed for $old -> $new; continuing"
+            fi
+        fi
+    done
 else
-  echo "patchelf no está instalado. Si ves errores por librerías faltantes instala patchelf y vuelve a intentar."
+    _warn "patchelf not installed. If the binary complains about missing libraries, consider installing patchelf and re-running the patch step."
 fi
 
-# =========================
-# Crear start.sh (5/6)
-# =========================
-echo
-echo "[5/6] Creando start.sh amigable en: $INSTALL_DIR/start.sh"
-
-cat > "$INSTALL_DIR/start.sh" <<START_SH
+# -------------------------
+# Create start.sh (robust and simple)
+# -------------------------
+cat > "$INSTALL_DIR/start.sh" <<'STARTSH'
 #!/usr/bin/env bash
-# start.sh generado por blockheads_installer_interactive.sh
 set -euo pipefail
-# Detectar carpeta del script
-DIR="\$(cd "\$(dirname "\$(readlink -f "\$0")")" && pwd)"
+DIR="$(dirname "$(readlink -f "$0")")"
+WORLD_ID="$WORLD_ID_PLACEHOLDER"
+PORT="$PORT_PLACEHOLDER"
+BINARY="$DIR/blockheads_server171"
+LOG_DIR="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$WORLD_ID"
+LOG_FILE="$LOG_DIR/console.log"
+mkdir -p "$LOG_DIR"
+chmod 755 "$LOG_DIR" || true
+if [ ! -x "$BINARY" ]; then chmod +x "$BINARY"; fi
 
-# Valores por defecto (puedes sobreescribir con argumentos o editar este archivo)
-WORLD_ID="${WORLD_ID}"
-PORT=${SERVER_PORT}
-RESTART_DELAY=1
-MAX_RESTARTS=0  # 0 = ilimitado
-
-LOG_DIR="\$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/\$WORLD_ID"
-LOG_FILE="\$LOG_DIR/console.log"
-SERVER_BINARY="\$DIR/$(basename "$SERVER_BINARY")"
-
-usage() {
-  cat <<EOF
-Uso: \$0 [--world <id>] [--port <port>] [--no-restart] [--help]
-Opciones:
-  --world <id>     : cambiar world id para esta ejecución
-  --port <port>    : cambiar puerto para esta ejecución
-  --no-restart     : ejecutar el servidor una vez (sin reiniciar automáticamente)
-  --help           : mostrar esta ayuda
-EOF
-}
-
-NO_RESTART=false
-while [ \$# -gt 0 ]; do
-  case "\$1" in
-    --world) WORLD_ID="\$2"; shift 2;;
-    --port) PORT="\$2"; shift 2;;
-    --no-restart) NO_RESTART=true; shift;;
-    --help) usage; exit 0;;
-    *) echo "Opción desconocida: \$1"; usage; exit 1;;
-  esac
-done
-
-mkdir -p "\$LOG_DIR"
-chmod 755 "\$LOG_DIR" || true
-
-if [ ! -f "\$SERVER_BINARY" ]; then
-  echo "Error: no se encontró el binario \$SERVER_BINARY"
-  exit 1
-fi
-if [ ! -x "\$SERVER_BINARY" ]; then
-  chmod +x "\$SERVER_BINARY" || true
-fi
-
-echo "Iniciando The Blockheads Server"
-echo " World: \$WORLD_ID"
-echo " Port: \$PORT"
-echo " Log: \$LOG_FILE"
-echo " (Ctrl+C para salir)"
-echo "-----------------------------------------"
-
-restart_count=0
-terminate_loop=false
-trap 'terminate_loop=true' SIGINT SIGTERM
-
-run_server() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ejecutando servidor..." | tee -a "\$LOG_FILE"
-  (cd "\$(dirname "\$SERVER_BINARY")" && "\$SERVER_BINARY" -o "\$WORLD_ID" -p "\$PORT") 2>&1 | tee -a "\$LOG_FILE"
-  return \${PIPESTATUS[0]:-0}
-}
-
-if [ "\$NO_RESTART" = true ]; then
-  run_server
-  exit_code=\$?
-  echo "Servidor finalizó (exit code: \$exit_code)"
-  exit \$exit_code
-fi
-
+echo "Starting Blockheads server (world: $WORLD_ID, port: $PORT)"
+# Run in an infinite restart loop
 while true; do
-  restart_count=\$((restart_count + 1))
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Inicio (restart #\$restart_count)" | tee -a "\$LOG_FILE"
-  run_server
-  exit_code=\$?
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Servidor salió (exit code: \$exit_code)" | tee -a "\$LOG_FILE"
-
-  if [ "\$terminate_loop" = true ]; then
-    echo "Shutdown solicitado. Saliendo del bucle." | tee -a "\$LOG_FILE"
-    break
-  fi
-
-  echo "Reiniciando en \$RESTART_DELAY s..." | tee -a "\$LOG_FILE"
-  sleep "\$RESTART_DELAY"
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "[$ts] Starting server..." | tee -a "$LOG_FILE"
+    (cd "$DIR" && ./blockheads_server171 -o "$WORLD_ID" -p "$PORT") 2>&1 | tee -a "$LOG_FILE"
+    rc=${PIPESTATUS[0]:-0}
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "[$ts] Server exited (code $rc). Restarting in 2s..." | tee -a "$LOG_FILE"
+    sleep 2
 done
+STARTSH
 
-echo "Bucle terminado."
-START_SH
-
+# Replace placeholders in the start.sh
+sed -i "s|WORLD_ID_PLACEHOLDER|$WORLD_ID|g" "$INSTALL_DIR/start.sh"
+sed -i "s|PORT_PLACEHOLDER|$SERVER_PORT|g" "$INSTALL_DIR/start.sh"
 chmod 755 "$INSTALL_DIR/start.sh"
-chown "$ORIGINAL_UID:$ORIGINAL_GID" "$INSTALL_DIR/start.sh" "$SERVER_BINARY" || true
 
-# =========================
-# systemd opcional
-# =========================
-echo
-if _cmd_exists systemctl && prompt_yesno "¿Deseas que cree un servicio systemd para gestionar el servidor automáticamente (arranque, logs, start/stop)?" "Y"; then
-  SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME"
-  cat > "$SERVICE_FILE" <<SERVICE
+# Set ownership correctly
+if [ $CREATE_SYSTEM_USER -eq 0 ]; then
+    chown -R blockheads:blockheads "$INSTALL_DIR"
+else
+    chown -R "$ORIGINAL_USER":"$ORIGINAL_USER" "$INSTALL_DIR"
+fi
+
+# -------------------------
+# Create systemd service (optional)
+# -------------------------
+if [ $INSTALL_SYSTEMD -eq 0 ]; then
+    _info "Creating systemd service: $DEFAULT_SERVICE_NAME.service"
+    SERVICE_FILE="/etc/systemd/system/$DEFAULT_SERVICE_NAME.service"
+    cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=The Blockheads Server
 After=network.target
 
 [Service]
 Type=simple
-User=$ORIGINAL_USER
+User=$( [ $CREATE_SYSTEM_USER -eq 0 ] && echo blockheads || echo "$ORIGINAL_USER" )
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/start.sh
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-Environment=HOME=/home/$ORIGINAL_USER
 
 [Install]
 WantedBy=multi-user.target
-SERVICE
-
-  chmod 644 "$SERVICE_FILE"
-  systemctl daemon-reload
-  systemctl enable "$SERVICE_NAME" || true
-  echo "Servicio systemd creado en $SERVICE_FILE y habilitado (no iniciado aún)."
-  if prompt_yesno "¿Iniciar el servicio ahora?" "Y"; then
-    systemctl start "$SERVICE_NAME" || true
-    echo "Servicio iniciado. Comprueba estado con: sudo systemctl status $SERVICE_NAME"
-  else
-    echo "Puedes iniciar el servicio más tarde con: sudo systemctl start $SERVICE_NAME"
-  fi
-else
-  echo "Se omite la creación de servicio systemd."
+EOF
+    systemctl daemon-reload
+    systemctl enable --now "$DEFAULT_SERVICE_NAME.service"
+    _info "Service installed and started. Use: systemctl status $DEFAULT_SERVICE_NAME"
 fi
 
-# =========================
-# Limpieza y verificación final (6/6)
-# =========================
-rm -rf "$TEMP_DIR" || true
+# -------------------------
+# Configure UFW (optional)
+# -------------------------
+if [ $OPEN_FIREWALL -eq 0 ]; then
+    if _cmd_exists ufw; then
+        _info "Allowing TCP port $SERVER_PORT through UFW..."
+        ufw allow "$SERVER_PORT/tcp" || _warn "ufw command returned non-zero"
+        _info "UFW rules updated."
+    else
+        _warn "UFW not found; skipping firewall step. If you use a different firewall, open TCP port $SERVER_PORT manually."
+    fi
+fi
 
-echo
-echo "=========================================="
-echo "Instalación finalizada."
-echo "  Carpeta: $INSTALL_DIR"
-echo "  Ejecutable: $(basename "$SERVER_BINARY")"
-echo "  Inicia el servidor con: $INSTALL_DIR/start.sh"
-echo "  O si creaste el servicio: sudo systemctl start $SERVICE_NAME"
-echo
-echo "Ver logs en tiempo real:"
-echo "  - Si usas start.sh: verás salida por pantalla (y además se guarda en ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/<world_id>/console.log)."
-echo "  - Si usas systemd: sudo journalctl -u $SERVICE_NAME -f"
-echo
-echo "Consejos:"
-echo "  - Edita $INSTALL_DIR/start.sh si quieres cambiar world_id o puerto de forma permanente."
-echo "  - Para detener el servicio systemd: sudo systemctl stop $SERVICE_NAME"
-echo "=========================================="
+# -------------------------
+# Setup logrotate
+# -------------------------
+_info "Installing logrotate configuration for Blockheads logs."
+cat > "/etc/logrotate.d/blockheads" <<EOF
+$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/*/console.log {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+
+# -------------------------
+# Setup backups (optional via cron)
+# -------------------------
+if [ $ENABLE_BACKUPS -eq 0 ]; then
+    _info "Creating daily backup script in $INSTALL_DIR/backup.sh and a cron job."
+    cat > "$INSTALL_DIR/backup.sh" <<'BK'
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(dirname "$(readlink -f "$0")")"
+BACKUP_DIR="$DIR/backups"
+mkdir -p "$BACKUP_DIR"
+TS=$(date '+%Y%m%d-%H%M%S')
+ARCHIVE="$BACKUP_DIR/blockheads-$TS.tar.gz"
+# Exclude backups and logs to avoid recursion
+tar --exclude='./backups' --exclude='./*.log' -czf "$ARCHIVE" -C "$DIR" .
+# Keep last 14 backups
+ls -1tr "$BACKUP_DIR"/blockheads-*.tar.gz | head -n -14 | xargs -r rm -f
+BK
+    sed -i "s|DIR=\"$(pwd)\"|DIR=\"$INSTALL_DIR\"|" "$INSTALL_DIR/backup.sh" || true
+    chmod +x "$INSTALL_DIR/backup.sh"
+    # Install cron job for root (runs daily at 03:30)
+    (crontab -l 2>/dev/null || true) | { cat; echo "30 3 * * * $INSTALL_DIR/backup.sh >/dev/null 2>&1"; } | crontab -
+    _info "Backup cron job installed (daily at 03:30). Backups stored in $INSTALL_DIR/backups"
+fi
+
+# -------------------------
+# Final notes to user
+# -------------------------
+_info "Installation complete."
+if [ $INSTALL_SYSTEMD -eq 0 ]; then
+    echo "Start/stop the server with: systemctl [start|stop|status] $DEFAULT_SERVICE_NAME"
+    echo "Follow logs with: journalctl -u $DEFAULT_SERVICE_NAME -f"
+else
+    echo "You chose not to install systemd service. Start the server manually from $INSTALL_DIR with: $INSTALL_DIR/start.sh"
+fi
+
+echo "Server binary: $INSTALL_DIR/$BINARY_NAME"
+echo "Logs (per world): \$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/<world_id>/console.log"
+echo "Backups (if enabled): $INSTALL_DIR/backups"
+
+echo "If something fails, check:'"
+echo "  - permissions: ls -l $INSTALL_DIR"
+echo "  - binary output: journalctl -u $DEFAULT_SERVICE_NAME -n 200" || true
+
+# Cleanup
+rm -rf "$TMPDIR"
+
+exit 0
