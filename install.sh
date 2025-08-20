@@ -1,292 +1,317 @@
-#!/bin/bash
-# =============================
-# Blockheads Interactive Installer (English) - Improved UI detection
-# This installer will:
-#  - download and extract the Blockheads tarball
-#  - create a start.sh matching your choices
-#  - optionally create a systemd service
-# The script uses dialog/whiptail if available and the terminal is interactive.
-# If dialog/whiptail cannot accept input (e.g. running from a non-interactive environment)
-# the script will automatically fall back to plain text prompts. You can also force
-# text mode with --text-ui or --no-dialog command-line flag.
-# =============================
-
+#!/usr/bin/env bash
+#
+# blockheads_installer_interactive.sh
+# Instalador interactivo y amigable para The Blockheads server (blockheads_server171)
+#
+# Uso:
+#   sudo ./blockheads_installer_interactive.sh
+#
 set -euo pipefail
-trap 'rc=$?; cleanup; exit $rc' EXIT
 
-cleanup() {
-    [ -n "${TEMP_DIR:-}" ] && rm -rf "$TEMP_DIR" || true
+# --------------------------
+# Config / valores por defecto
+# --------------------------
+DEFAULT_SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
+DEFAULT_INSTALL_DIR="$(pwd)"
+DEFAULT_WORLD_ID="83cad395edb8d0f1912fec89508d8a1d"
+DEFAULT_PORT=15151
+SERVICE_NAME="blockheads.service"
+
+# --------------------------
+# Helpers
+# --------------------------
+_cmd_exists() { command -v "$1" >/dev/null 2>&1; }
+prompt_yesno() {
+  local prompt="${1:-Continue?}"
+  local default="${2:-Y}" # Y or N
+  local ans
+  while true; do
+    if [ "$default" = "Y" ]; then
+      read -rp "$prompt [Y/n]: " ans
+      ans="${ans:-Y}"
+    else
+      read -rp "$prompt [y/N]: " ans
+      ans="${ans:-N}"
+    fi
+    case "${ans,,}" in
+      y|yes) return 0;;
+      n|no) return 1;;
+      *) echo "Por favor responde 'y' o 'n'.";;
+    esac
+  done
 }
 
-# Helper: check for command
-_cmd_exists() { command -v "$1" >/dev/null 2>&1; }
+# --------------------------
+# Privilegios root
+# --------------------------
+if [ "$(id -u)" -ne 0 ]; then
+  echo "ERROR: este script requiere privilegios de root."
+  echo "Ejecuta: sudo $0"
+  exit 1
+fi
 
-# Parse CLI flags to allow forcing text UI
-FORCE_TEXT_UI=false
-for arg in "$@"; do
-    case "$arg" in
-        --text-ui|--no-dialog)
-            FORCE_TEXT_UI=true
-            ;;
-    esac
+ORIGINAL_USER="${SUDO_USER:-${USER:-root}}"
+ORIGINAL_UID=$(id -u "$ORIGINAL_USER" 2>/dev/null || echo 1000)
+ORIGINAL_GID=$(id -g "$ORIGINAL_USER" 2>/dev/null || echo 1000)
+
+echo "=========================================="
+echo "  Blockheads Installer (interactivo)"
+echo "=========================================="
+echo "Usuario que ejecutó sudo: $ORIGINAL_USER"
+echo
+
+# --------------------------
+# Preguntas al usuario
+# --------------------------
+read -rp "Directorio donde instalar (enter = carpeta actual): " INSTALL_DIR
+INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+mkdir -p "$INSTALL_DIR"
+
+read -rp "URL del paquete del servidor (enter = predeterminada): " SERVER_URL
+SERVER_URL="${SERVER_URL:-$DEFAULT_SERVER_URL}"
+
+read -rp "World ID (enter = $DEFAULT_WORLD_ID): " WORLD_ID
+WORLD_ID="${WORLD_ID:-$DEFAULT_WORLD_ID}"
+
+read -rp "Puerto del servidor (enter = $DEFAULT_PORT): " SERVER_PORT
+SERVER_PORT="${SERVER_PORT:-$DEFAULT_PORT}"
+
+echo
+echo "Resumen:"
+echo "  Carpeta de instalación: $INSTALL_DIR"
+echo "  URL del servidor: $SERVER_URL"
+echo "  World ID: $WORLD_ID"
+echo "  Puerto: $SERVER_PORT"
+echo
+
+if ! prompt_yesno "¿Continuar con la instalación?" "Y"; then
+  echo "Cancelado por el usuario."
+  exit 0
+fi
+
+# --------------------------
+# Preparación
+# --------------------------
+TEMP_DIR=$(mktemp -d)
+TEMP_FILE="$TEMP_DIR/blockheads_server171.tar.gz"
+cd "$INSTALL_DIR"
+
+echo
+echo "[1/6] Comprobando herramientas necesarias..."
+tools_missing=()
+for t in wget curl tar file; do
+  if ! _cmd_exists "$t"; then
+    tools_missing+=("$t")
+  fi
 done
 
-# UI helpers: use dialog if present, else whiptail, else fallback to read
-DIALOG_CMD=""
-if [ "$FORCE_TEXT_UI" = false ]; then
-    # Only enable dialog/whiptail if they exist and the script is running on an interactive TTY
-    if _cmd_exists dialog && [ -t 0 ] && [ -t 1 ]; then
-        DIALOG_CMD="dialog"
-    elif _cmd_exists whiptail && [ -t 0 ] && [ -t 1 ]; then
-        DIALOG_CMD="whiptail"
+if [ ${#tools_missing[@]} -gt 0 ]; then
+  echo "Nota: faltan algunas utilidades: ${tools_missing[*]}"
+  if _cmd_exists apt-get; then
+    if prompt_yesno "¿Deseas que el script intente instalar dependencias con apt-get?" "Y"; then
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y --no-install-recommends "${tools_missing[@]}" >/dev/null || true
     else
-        DIALOG_CMD=""
+      echo "Continúo sin instalar dependencias. Asegúrate manualmente de instalarlas si hay errores."
     fi
+  else
+    echo "No hay apt-get disponible. Instala manualmente: ${tools_missing[*]}"
+  fi
 else
-    DIALOG_CMD=""
+  echo "Todas las utilidades necesarias están disponibles."
 fi
 
-ui_input() {
-    # ui_input "Title" "Prompt" "default"
-    local title="$1" prompt="$2" default="$3" result=""
-    if [ -n "$DIALOG_CMD" ]; then
-        if [ "$DIALOG_CMD" = "dialog" ]; then
-            tmpfile=$(mktemp)
-            dialog --backtitle "Blockheads Installer" --ok-label "OK" --inputbox "$prompt" 10 60 "$default" 2>"$tmpfile" || true
-            result=$(cat "$tmpfile")
-            rm -f "$tmpfile"
-        else
-            result=$(whiptail --title "$title" --inputbox "$prompt" 10 60 "$default" 3>&1 1>&2 2>&3 || true)
-        fi
-    else
-        read -rp "$prompt [$default]: " result
-        result=${result:-$default}
-    fi
-    echo "$result"
-}
-
-ui_yesno() {
-    # ui_yesno "Title" "Question" (returns 0 for yes, 1 for no)
-    local title="$1" question="$2"
-    if [ -n "$DIALOG_CMD" ]; then
-        if [ "$DIALOG_CMD" = "dialog" ]; then
-            dialog --backtitle "Blockheads Installer" --yes-label "Yes" --no-label "No" --yesno "$question" 8 60
-            return $?
-        else
-            whiptail --title "$title" --yesno "$question" 8 60
-            return $?
-        fi
-    else
-        while true; do
-            read -rp "$question (y/n): " yn
-            case "$yn" in
-                [Yy]*) return 0 ;; 
-                [Nn]*) return 1 ;; 
-                *) echo "Please answer y or n.";;
-            esac
-        done
-    fi
-}
-
-# Ensure script runs as root because we'll install packages or write system files
-if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    echo "This installer needs root privileges. Please run with sudo."
-    exit 1
-fi
-
-ORIGINAL_USER=${SUDO_USER:-$USER}
-TEMP_DIR=$(mktemp -d)
-WORK_DIR="$(pwd)"
-SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
-TEMP_FILE="$TEMP_DIR/blockheads_server171.tar.gz"
-
-# Inform about UI mode (helpful when user can't press OK)
-if [ -n "$DIALOG_CMD" ]; then
-    echo "Interactive UI mode: $DIALOG_CMD (using dialog/whiptail)"
-else
-    echo "Text UI mode: dialog/whiptail disabled or terminal not interactive. Running plain prompts."
-    echo "If you prefer the graphical-like dialog boxes, run this script from a regular terminal emulator and do not double-click it."
-fi
-
-# Interactive flow: ask user for options
-if [ -n "$DIALOG_CMD" ]; then
-    if [ "$DIALOG_CMD" = "dialog" ]; then
-        dialog --backtitle "Blockheads Installer" --title "Welcome" --msgbox "Welcome to the interactive installer for The Blockheads server.
-
-If you cannot press OK, run the installer with --text-ui to use plain prompts instead.
-
-Press OK to continue." 12 70
-    else
-        whiptail --title "Welcome" --msgbox "Welcome to the interactive installer for The Blockheads server.
-
-If you cannot press OK, run the installer with --text-ui to use plain prompts instead.
-
-Press OK to continue." 12 70
-    fi
-fi
-
-# Default values
-DEFAULT_INSTALL_DIR="$WORK_DIR"
-default_world_id="83cad395edb8d0f1912fec89508d8a1d"
-default_port=15151
-
-install_dir=$(ui_input "Install directory" "Installation directory (absolute or relative path). The archive will be extracted here:" "$DEFAULT_INSTALL_DIR")
-# Expand and normalize path
-if [ -d "$install_dir" ]; then
-    install_dir="$(cd "$install_dir" && pwd)"
-else
-    mkdir -p "$install_dir" 2>/dev/null || true
-    install_dir="$(cd "$install_dir" 2>/dev/null && pwd || echo "$install_dir")"
-fi
-
-world_id=$(ui_input "World ID" "World ID (unique identifier for saves). You can keep the default:" "$default_world_id")
-
-server_port=$(ui_input "Server port" "Server port (15151 is default):" "$default_port")
-# Validate port
-if ! echo "$server_port" | grep -Eq '^[0-9]+$' || [ "$server_port" -lt 1 ] || [ "$server_port" -gt 65535 ]; then
-    echo "Invalid port: $server_port. Using 15151.";
-    server_port=15151
-fi
-
-want_systemd=false
-if ui_yesno "Service" "Do you want the installer to create a systemd service so the server runs in background and starts on boot?"; then
-    want_systemd=true
-fi
-
-use_patchelf=false
-if ui_yesno "Patchelf" "Do you want the installer to attempt binary compatibility patches using patchelf (requires patchelf) ?"; then
-    use_patchelf=true
-fi
-
-# Confirm
-if ! ui_yesno "Confirm" "Install server in: $install_dir
-World ID: $world_id
-Port: $server_port
-Create systemd service: $want_systemd
-Apply patchelf patches: $use_patchelf
-
-Continue?"; then
-    echo "Installation cancelled."; exit 0
-fi
-
-# Prepare install directory
-mkdir -p "$install_dir"
-chown "$ORIGINAL_USER":"$ORIGINAL_USER" "$install_dir" || true
-cd "$install_dir"
-
-# Install recommended packages if apt-get present
-if _cmd_exists apt-get; then
-    echo "Installing required packages (if missing)..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y >/dev/null
-    apt-get install -y wget curl tar file >/dev/null
-    if [ "$use_patchelf" = true ]; then
-        apt-get install -y patchelf >/dev/null
-    fi
-else
-    echo "apt-get not found. Please ensure wget/curl/tar (and patchelf if requested) are installed manually."
-fi
-
-# Download archive
-echo "Downloading server archive from: $SERVER_URL"
+# --------------------------
+# Descargar
+# --------------------------
+echo
+echo "[2/6] Descargando servidor desde: $SERVER_URL"
 if _cmd_exists wget; then
-    wget -q "$SERVER_URL" -O "$TEMP_FILE"
+  wget -q "$SERVER_URL" -O "$TEMP_FILE" || { echo "ERROR: fallo al descargar con wget"; exit 1; }
 elif _cmd_exists curl; then
-    curl -sSL "$SERVER_URL" -o "$TEMP_FILE"
+  curl -sSL "$SERVER_URL" -o "$TEMP_FILE" || { echo "ERROR: fallo al descargar con curl"; exit 1; }
 else
-    echo "Error: neither wget nor curl is available."; exit 1
+  echo "ERROR: ni wget ni curl están disponibles."
+  exit 1
 fi
 
-# Extract archive
-echo "Extracting archive into: $install_dir"
-if ! tar xzf "$TEMP_FILE" -C "$install_dir"; then
-    echo "Extraction failed. Please check the downloaded tarball."; exit 1
+# Comprobar tipo archivo (mejor detección)
+if _cmd_exists file; then
+  mime=$(file --mime-type -b "$TEMP_FILE" || echo "")
+  if ! echo "$mime" | grep -q -E "gzip|x-gzip|x-tar"; then
+    echo "Advertencia: el archivo descargado no parece un tar.gz (mime: $mime). La extracción puede fallar."
+  fi
 fi
 
-# Verify binary
-server_binary="$install_dir/blockheads_server171"
-if [ ! -f "$server_binary" ]; then
-    echo "Error: blockheads_server171 binary was not found in the extracted archive."; exit 1
-fi
-chmod +x "$server_binary"
-[ ! -f "${server_binary}.orig" ] && cp -p "$server_binary" "${server_binary}.orig" || true
+# --------------------------
+# Extraer
+# --------------------------
+echo
+echo "[3/6] Extrayendo en: $INSTALL_DIR"
+tar xzf "$TEMP_FILE" -C "$INSTALL_DIR" || { echo "ERROR: extracción fallida"; exit 1; }
 
-# Attempt patchelf replacements if requested
-if [ "$use_patchelf" = true ]; then
-    if _cmd_exists patchelf; then
-        echo "Attempting to patch runtime library dependencies using patchelf..."
-        replacements=(
-            "libgnustep-base.so.1.24:libgnustep-base.so.1.28"
-            "libobjc.so.4.6:libobjc.so.4"
-            "libgnutls.so.26:libgnutls.so.30"
-            "libgcrypt.so.11:libgcrypt.so.20"
-            "libffi.so.6:libffi.so.8"
-            "libicui18n.so.48:libicui18n.so.70"
-            "libicuuc.so.48:libicuuc.so.70"
-            "libicudata.so.48:libicudata.so.70"
-            "libdispatch.so:libdispatch.so.0"
-        )
-        for pair in "${replacements[@]}"; do
-            oldlib=${pair%%:*}
-            newlib=${pair##*:}
-            if patchelf --print-needed "$server_binary" 2>/dev/null | grep -q "$oldlib"; then
-                echo "Patching $oldlib -> $newlib"
-                if ! patchelf --replace-needed "$oldlib" "$newlib" "$server_binary" 2>/dev/null; then
-                    echo "Warning: patchelf failed for $oldlib -> $newlib (continuing)"
-                fi
-            fi
-        done
-    else
-        echo "patchelf not found. Skipping binary patch step."
+SERVER_BINARY="$INSTALL_DIR/blockheads_server171"
+if [ ! -f "$SERVER_BINARY" ]; then
+  # Buscar binarios extraídos por si vienen en subcarpeta
+  maybe=$(find "$INSTALL_DIR" -maxdepth 2 -type f -name 'blockheads_server*' -print -quit || true)
+  if [ -n "$maybe" ]; then
+    SERVER_BINARY="$maybe"
+  fi
+fi
+
+if [ ! -f "$SERVER_BINARY" ]; then
+  echo "ERROR: No se encontró blockheads_server171 después de extraer. Verifica el contenido del tarball."
+  ls -la "$INSTALL_DIR"
+  exit 1
+fi
+
+chmod +x "$SERVER_BINARY"
+cp -p "$SERVER_BINARY" "${SERVER_BINARY}.orig" 2>/dev/null || true
+
+# --------------------------
+# Patching con patchelf (opcional)
+# --------------------------
+echo
+echo "[4/6] Intentando parchar dependencias (patchelf si está instalado)..."
+if _cmd_exists patchelf; then
+  replacements=(
+    "libgnustep-base.so.1.24:libgnustep-base.so.1.28"
+    "libobjc.so.4.6:libobjc.so.4"
+    "libgnutls.so.26:libgnutls.so.30"
+    "libgcrypt.so.11:libgcrypt.so.20"
+    "libffi.so.6:libffi.so.8"
+    "libicui18n.so.48:libicui18n.so.70"
+    "libicuuc.so.48:libicuuc.so.70"
+    "libicudata.so.48:libicudata.so.70"
+    "libdispatch.so:libdispatch.so.0"
+  )
+  for pair in "${replacements[@]}"; do
+    oldlib=${pair%%:*}
+    newlib=${pair##*:}
+    if patchelf --print-needed "$SERVER_BINARY" 2>/dev/null | grep -q "$oldlib"; then
+      echo "  Patching $oldlib -> $newlib"
+      if patchelf --replace-needed "$oldlib" "$newlib" "$SERVER_BINARY" 2>/dev/null; then
+        echo "    OK"
+      else
+        echo "    Advertencia: fallo al aplicar patchelf para $oldlib -> $newlib (se continúa)"
+      fi
     fi
+  done
+else
+  echo "patchelf no está instalado. Si ves errores por librerías faltantes instala patchelf y vuelve a intentar."
 fi
 
-# Create start.sh
-cat > "$install_dir/start.sh" <<EOF
+# --------------------------
+# Crear start.sh personalizado
+# --------------------------
+echo
+echo "[5/6] Creando start.sh amigable en: $INSTALL_DIR/start.sh"
+
+cat > "$INSTALL_DIR/start.sh" <<START_SH
 #!/usr/bin/env bash
+# start.sh generado por blockheads_installer_interactive.sh
 set -euo pipefail
-DIR="\$(dirname "\$(readlink -f \"\$0\")")"
-world_id="$world_id"
-server_port=$server_port
-log_dir="\$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/\$world_id"
-log_file="\$log_dir/console.log"
-server_binary="\$DIR/blockheads_server171"
-restart_delay=1
-max_restarts=0
-mkdir -p "\$log_dir"; chmod 755 "\$log_dir" || true
-if [ ! -f "\$server_binary" ]; then
-echo "Error: cannot find \$server_binary"; exit 1; fi
-if [ ! -x "\$server_binary" ]; then chmod +x "\$server_binary" || true; fi
+# Detectar carpeta del script
+DIR="\$(cd "\$(dirname "\$(readlink -f "\$0")")" && pwd)"
+
+# Valores por defecto (puedes sobreescribir con argumentos o editar este archivo)
+WORLD_ID="${WORLD_ID}"
+PORT=${SERVER_PORT}
+RESTART_DELAY=1
+MAX_RESTARTS=0  # 0 = ilimitado
+
+LOG_DIR="\$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/\$WORLD_ID"
+LOG_FILE="\$LOG_DIR/console.log"
+SERVER_BINARY="\$DIR/$(basename "$SERVER_BINARY")"
+
+usage() {
+  cat <<EOF
+Uso: \$0 [--world <id>] [--port <port>] [--no-restart] [--help]
+Opciones:
+  --world <id>     : cambiar world id para esta ejecución
+  --port <port>    : cambiar puerto para esta ejecución
+  --no-restart     : ejecutar el servidor una vez (sin reiniciar automáticamente)
+  --help           : mostrar esta ayuda
+EOF
+}
+
+# Parse args simples
+NO_RESTART=false
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --world) WORLD_ID="\$2"; shift 2;;
+    --port) PORT="\$2"; shift 2;;
+    --no-restart) NO_RESTART=true; shift;;
+    --help) usage; exit 0;;
+    *) echo "Opción desconocida: \$1"; usage; exit 1;;
+  esac
+done
+
+mkdir -p "\$LOG_DIR"
+chmod 755 "\$LOG_DIR" || true
+
+if [ ! -f "\$SERVER_BINARY" ]; then
+  echo "Error: no se encontró el binario \$SERVER_BINARY"
+  exit 1
+fi
+if [ ! -x "\$SERVER_BINARY" ]; then
+  chmod +x "\$SERVER_BINARY" || true
+fi
+
+echo "Iniciando The Blockheads Server"
+echo " World: \$WORLD_ID"
+echo " Port: \$PORT"
+echo " Log: \$LOG_FILE"
+echo " (Ctrl+C para salir)"
+echo "-----------------------------------------"
+
 restart_count=0
 terminate_loop=false
 trap 'terminate_loop=true' SIGINT SIGTERM
+
+run_server() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Ejecutando servidor..." | tee -a "\$LOG_FILE"
+  (cd "\$(dirname "\$SERVER_BINARY")" && "\$SERVER_BINARY" -o "\$WORLD_ID" -p "\$PORT") 2>&1 | tee -a "\$LOG_FILE"
+  return \${PIPESTATUS[0]:-0}
+}
+
+if [ "\$NO_RESTART" = true ]; then
+  run_server
+  exit_code=\$?
+  echo "Servidor finalizó (exit code: \$exit_code)"
+  exit \$exit_code
+fi
+
 while true; do
-    if [ "$max_restarts" -gt 0 ] && [ "$restart_count" -ge "$max_restarts" ]; then
-        echo "Reached max restarts, exiting."; break
-    fi
-    restart_count=\$((restart_count+1))
-    ts="\$(date '+%Y-%m-%d %H:%M:%S')"
-    echo "[\$ts] Starting server (restart #\$restart_count)" | tee -a "\$log_file"
-    (cd "\$DIR" && ./blockheads_server171 -o "\$world_id" -p "\$server_port") 2>&1 | tee -a "\$log_file"
-    exit_code=\${PIPESTATUS[0]:-0}
-    ts="\$(date '+%Y-%m-%d %H:%M:%S')"
-    echo "[\$ts] Server closed (exit code: \$exit_code)" | tee -a "\$log_file"
-    if [ "\$terminate_loop" = true ]; then
-        echo "Shutdown requested, exiting loop." | tee -a "\$log_file"; break
-    fi
-    echo "Restarting in \$restart_delay second(s)..." | tee -a "\$log_file"
-    sleep "\$restart_delay"
+  restart_count=\$((restart_count + 1))
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Inicio (restart #\$restart_count)" | tee -a "\$LOG_FILE"
+  run_server
+  exit_code=\$?
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Servidor salió (exit code: \$exit_code)" | tee -a "\$LOG_FILE"
+
+  if [ "\$terminate_loop" = true ]; then
+    echo "Shutdown solicitado. Saliendo del bucle." | tee -a "\$LOG_FILE"
+    break
+  fi
+
+  echo "Reiniciando en \$RESTART_DELAY s..." | tee -a "\$LOG_FILE"
+  sleep "\$RESTART_DELAY"
 done
-echo "Server loop terminated."
-EOF
 
-chown "$ORIGINAL_USER":"$ORIGINAL_USER" "$install_dir/start.sh" "$server_binary" || true
-chmod 755 "$install_dir/start.sh" "$server_binary" || true
+echo "Bucle terminado."
+START_SH
 
-# Optionally create systemd service
-service_name="blockheads-server.service"
-if [ "$want_systemd" = true ]; then
-    cat > "/etc/systemd/system/$service_name" <<SVC
+chmod 755 "$INSTALL_DIR/start.sh"
+chown "$ORIGINAL_UID:$ORIGINAL_GID" "$INSTALL_DIR/start.sh" "$SERVER_BINARY" || true
+
+# --------------------------
+# Preguntar si crear servicio systemd (opcional)
+# --------------------------
+echo
+if _cmd_exists systemctl && prompt_yesno "¿Deseas que cree un servicio systemd para gestionar el servidor automáticamente (arranque, logs, start/stop)?" "Y"; then
+  SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME"
+  cat > "$SERVICE_FILE" <<SERVICE
 [Unit]
 Description=The Blockheads Server
 After=network.target
@@ -294,39 +319,50 @@ After=network.target
 [Service]
 Type=simple
 User=$ORIGINAL_USER
-WorkingDirectory=$install_dir
-ExecStart=$install_dir/start.sh
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/start.sh
 Restart=on-failure
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=HOME=/home/$ORIGINAL_USER
 
 [Install]
 WantedBy=multi-user.target
-SVC
-    systemctl daemon-reload || true
-    if ! systemctl enable --now "$service_name" >/dev/null 2>&1; then
-        echo "Warning: could not enable/start systemd service automatically. You can start it with: sudo systemctl start $service_name"
-    fi
+SERVICE
+
+  chmod 644 "$SERVICE_FILE"
+  systemctl daemon-reload
+  systemctl enable "$SERVICE_NAME" || true
+  echo "Servicio systemd creado en $SERVICE_FILE y habilitado (no iniciado aún)."
+  if prompt_yesno "¿Iniciar el servicio ahora?" "Y"; then
+    systemctl start "$SERVICE_NAME"
+    echo "Servicio iniciado. Comprueba estado con: sudo systemctl status $SERVICE_NAME"
+  else
+    echo "Puedes iniciar el servicio más tarde con: sudo systemctl start $SERVICE_NAME"
+  fi
+else
+  echo "Se omite la creación de servicio systemd."
 fi
 
-# Final message
-echo "================================================================"
-echo "Installation completed in: $install_dir"
-echo "Executable: $server_binary"
-echo "Start script: $install_dir/start.sh"
-echo "World ID: $world_id  Port: $server_port"
-if [ "$want_systemd" = true ]; then
-    echo "Systemd service: /etc/systemd/system/$service_name"
-fi
+# --------------------------
+# Limpieza y verificación final
+# --------------------------
+rm -rf "$TEMP_DIR" || true
 
-echo "To run the server as a normal (non-root) user:"
-echo "  cd $install_dir && ./start.sh"
-
-echo "To monitor logs in real time: tail -f ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id/console.log"
-
-echo "If the dialog boxes don't accept keyboard input, run this installer with: sudo ./installer.sh --text-ui"
-
-echo "================================================================"
-
-cleanup
-
-exit 0
+echo
+echo "=========================================="
+echo "Instalación finalizada."
+echo "  Carpeta: $INSTALL_DIR"
+echo "  Ejecutable: $(basename "$SERVER_BINARY")"
+echo "  Inicia el servidor con: $INSTALL_DIR/start.sh"
+echo "  O si creaste el servicio: sudo systemctl start $SERVICE_NAME"
+echo
+echo "Ver logs en tiempo real:"
+echo "  - Si usas start.sh: verás salida por pantalla (y además se guarda en ~/.*/console.log)."
+echo "  - Si usas systemd: sudo journalctl -u $SERVICE_NAME -f"
+echo
+echo "Consejos:"
+echo "  - Edita $INSTALL_DIR/start.sh si quieres cambiar world_id o puerto de forma permanente."
+echo "  - Para detener el servicio systemd: sudo systemctl stop $SERVICE_NAME"
+echo "=========================================="
