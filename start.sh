@@ -33,8 +33,11 @@ fi
 # Ensure execute permissions on the binary
 chmod +x "$server_binary"
 
-# Set permissions for future editing of this script
-chmod 644 "$0"  # Read/write for owner, read for others
+# Ensure this script is writable by the current user
+if [ ! -w "$0" ]; then
+    echo "Adjusting permissions for $0..."
+    chmod 644 "$0"  # Read/write for owner, read for others
+fi
 
 echo "Starting The Blockheads Server"
 echo "World: $world_id"
