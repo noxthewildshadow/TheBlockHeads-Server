@@ -321,6 +321,22 @@ add_purchase() {
     echo "$current_data" > "$ECONOMY_FILE"
 }
 
+# Check if player already has a rank (MOD or ADMIN)
+has_rank() {
+    local player_name="$1"
+    local rank="$2"
+    
+    # Check if player has purchased the rank
+    if has_purchased "$player_name" "$rank"; then
+        return 0  # Player has the rank
+    fi
+    
+    # Additional check: if player is already MOD/ADMIN in the game
+    # This would require checking the server's internal state, which is complex
+    # For now, we'll rely on the purchase tracking
+    return 1
+}
+
 # Process player message
 process_message() {
     local player_name="$1"
@@ -446,6 +462,11 @@ filter_server_log() {
     while read line; do
         # Skip lines with server restart messages
         if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
+            continue
+        fi
+        
+        # Skip server-generated welcome messages to avoid duplicates
+        if [[ "$line" == *"SERVER: say"*"Welcome"* ]] || [[ "$line" == *"SERVER: say"*"received"*"ticket"*"welcome bonus"* ]]; then
             continue
         fi
         
