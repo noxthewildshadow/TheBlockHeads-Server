@@ -1,17 +1,15 @@
 # TheBlockHeads-Server 2025
 New launcher for TheBlockHeads server on linux
 
-Easy install (just copy and paste):
 
-curl -sSL https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server/refs/heads/main/Setup.sh | sudo bash
 
 📖 Detailed Instructions
 Step 1: Installation
 Download the setup script to your server
 
-Make it executable: chmod +x setup.sh
+Easy install (just copy and paste):
 
-Run with sudo: sudo ./setup.sh
+curl -sSL https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server/refs/heads/main/Setup.sh | sudo bash
 
 The setup script will:
 
