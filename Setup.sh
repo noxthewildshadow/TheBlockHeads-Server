@@ -30,24 +30,63 @@ echo "[1/7] Installing required packages..."
 } > /dev/null 2>&1
 
 echo "[2/7] Downloading server..."
-wget -q "$SERVER_URL" -O "$TEMP_FILE"
+if ! wget -q "$SERVER_URL" -O "$TEMP_FILE"; then
+    echo "ERROR: Failed to download server file."
+    echo "Please check your internet connection and try again."
+    exit 1
+fi
 
 echo "[3/7] Extracting files..."
-tar xzf "$TEMP_FILE" -C .
+if ! tar xzf "$TEMP_FILE" -C .; then
+    echo "ERROR: Failed to extract server files."
+    echo "The downloaded file may be corrupted."
+    exit 1
+fi
+
+# Check if the server binary exists and has the correct name
+if [ ! -f "$SERVER_BINARY" ]; then
+    echo "WARNING: $SERVER_BINARY not found. Searching for alternative binary names..."
+    # Look for any executable file that might be the server
+    ALTERNATIVE_BINARY=$(find . -name "*blockheads*" -type f -executable | head -n 1)
+    
+    if [ -n "$ALTERNATIVE_BINARY" ]; then
+        echo "Found alternative binary: $ALTERNATIVE_BINARY"
+        SERVER_BINARY=$(basename "$ALTERNATIVE_BINARY")
+        # Rename to the expected name
+        mv "$ALTERNATIVE_BINARY" "blockheads_server171"
+        echo "Renamed to: blockheads_server171"
+    else
+        echo "ERROR: Could not find the server binary."
+        echo "Contents of the downloaded archive:"
+        tar -tzf "$TEMP_FILE"
+        exit 1
+    fi
+fi
+
 chmod +x "$SERVER_BINARY"
 
-# Apply library compatibility patches
 echo "[4/7] Configuring library compatibility..."
-patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SERVER_BINARY"
-patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SERVER_BINARY"
-patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 "$SERVER_BINARY"
-patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 "$SERVER_BINARY"
-patchelf --replace-needed libffi.so.6 libffi.so.8 "$SERVER_BINARY"
-patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 "$SERVER_BINARY"
-patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 "$SERVER_BINARY"
-patchelf --replace-needed libicudata.so.48 libicudata.so.70 "$SERVER_Binary"
-patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY"
+# Verify the binary exists before applying patches
+if [ ! -f "$SERVER_BINARY" ]; then
+    echo "ERROR: Cannot find server binary $SERVER_BINARY for patching."
+    exit 1
+fi
 
+# Apply library compatibility patches one by one with error checking
+echo "Applying library patches..."
+patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SERVER_BINARY" || echo "Warning: libgnustep-base patch may have failed"
+patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SERVER_BINARY" || echo "Warning: libobjc patch may have failed"
+patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 "$SERVER_BINARY" || echo "Warning: libgnutls patch may have failed"
+patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 "$SERVER_BINARY" || echo "Warning: libgcrypt patch may have failed"
+patchelf --replace-needed libffi.so.6 libffi.so.8 "$SERVER_BINARY" || echo "Warning: libffi patch may have failed"
+patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 "$SERVER_BINARY" || echo "Warning: libicui18n patch may have failed"
+patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 "$SERVER_BINARY" || echo "Warning: libicuuc patch may have failed"
+patchelf --replace-needed libicudata.so.48 libicudata.so.70 "$SERVER_BINARY" || echo "Warning: libicudata patch may have failed"
+patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY" || echo "Warning: libdispatch patch may have failed"
+
+echo "Library compatibility patches applied (some warnings may be normal)"
+
+# Resto del script permanece igual...
 echo "[5/7] Creating start script..."
 cat > start.sh << 'EOF'
 #!/bin/bash
@@ -516,5 +555,6 @@ if sudo -u "$ORIGINAL_USER" ./blockheads_server171 --help > /dev/null 2>&1; then
     echo "Status: Executable verified successfully"
 else
     echo "Warning: The executable might have compatibility issues"
+    echo "You may need to manually install additional dependencies"
 fi
 echo "================================================================"
