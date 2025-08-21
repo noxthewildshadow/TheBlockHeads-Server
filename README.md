@@ -26,11 +26,13 @@ Set up the economy data file
 Step 2: Starting the Server
 The server must be run in a screen session to allow the bot to communicate with it:
 
-bash
+bash:
+
 screen -S blockheads -d -m ./start.sh
 To view the server console:
 
-bash
+bash:
+
 screen -r blockheads
 To detach from the console (without stopping the server):
 
