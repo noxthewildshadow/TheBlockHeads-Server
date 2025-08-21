@@ -257,9 +257,10 @@ show_welcome_message() {
     # Check if enough time has passed (3 minutes = 180 seconds)
     if [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
         if [ "$is_new_player" = "true" ]; then
-            send_server_command "Welcome $player_name! You received 1 ticket as a welcome bonus. Type !economy_help for info."
+            # Don't send welcome message for new players - the server does this automatically
+            echo "Server will handle welcome message for new player: $player_name"
         else
-            send_server_command "Welcome $player_name! Type !economy_help to see economy commands."
+            send_server_command "Welcome back $player_name! Type !economy_help to see economy commands."
         fi
         
         # Update last_welcome_time
@@ -509,12 +510,14 @@ monitor_log() {
                 is_new_player="true"
             fi
             
-            # Solo mostrar mensaje de bienvenida si es nuevo jugador o si no se ha mostrado en esta sesión
+            # For new players, the server automatically sends welcome messages
+            # For returning players, we'll show a welcome message and grant login ticket
             if [ "$is_new_player" = "true" ]; then
-                show_welcome_message "$player_name" "$is_new_player"
+                # Server will handle the welcome message for new players
+                echo "New player $player_name connected - server will handle welcome message"
                 welcome_shown["$player_name"]=1
             else
-                # Solo mostrar mensaje de bienvenida si no se ha mostrado en esta sesión
+                # Only show welcome message if not shown in this session
                 if [ -z "${welcome_shown[$player_name]}" ]; then
                     show_welcome_message "$player_name" "$is_new_player"
                     welcome_shown["$player_name"]=1
