@@ -162,14 +162,29 @@ echo "[6/7] Creating bot server script..."
 cat > bot_server.sh << 'EOF'
 #!/bin/bash
 
+set -e
+
 # Bot configuration
 ECONOMY_FILE="economy_data.json"
 SCAN_INTERVAL=5
 
+# Lock file for safe writes to ECONOMY_FILE
+SAVE_LOCK="/tmp/blockheads_economy.lock"
+
+# Safe write function using flock to avoid race conditions
+save_data() {
+    local data="$1"
+    # Use file descriptor 200 to hold lock file while writing
+    (
+        flock -x 200
+        printf '%s' "$data" > "$ECONOMY_FILE"
+    ) 200>"$SAVE_LOCK"
+}
+
 # Initialize economy data file if it doesn't exist
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
-        echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
+        save_data '{"players": {}, "transactions": []}'
         echo "Economy data file created."
     fi
 }
@@ -177,53 +192,68 @@ initialize_economy() {
 # Add player to economy system if not exists
 add_player_if_new() {
     local player_name="$1"
-    local current_data=$(cat "$ECONOMY_FILE")
-    local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
+    local current_data
+    current_data=$(cat "$ECONOMY_FILE")
+    local player_exists
+    player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
     
     if [ "$player_exists" = "false" ]; then
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0}')
-        echo "$current_data" > "$ECONOMY_FILE"
+        # Create player record with default fields and rank flags
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" \
+            '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "ranks": {"mod": false, "admin": false}}')
+        save_data "$current_data"
         echo "Added new player: $player_name"
         
-        # Give first-time bonus
+        # Give first-time bonus (this also sends the welcome message and sets last_welcome_time)
         give_first_time_bonus "$player_name"
         return 0  # Jugador nuevo
     fi
     return 1  # Jugador existente
 }
 
-# Give first-time bonus to new players
+# Give first-time bonus to new players (sends welcome message once)
 give_first_time_bonus() {
     local player_name="$1"
-    local current_data=$(cat "$ECONOMY_FILE")
-    local current_time=$(date +%s)
+    local current_data
+    current_data=$(cat "$ECONOMY_FILE")
+    local current_time
+    current_time=$(date +%s)
     
-    # Give 1 ticket to new player
+    # Give 1 ticket to new player and set last_login
     current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets = 1')
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
+    
+    # Set last_welcome_time so show_welcome_message won't send again immediately
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_welcome_time = $time')
     
     # Add transaction record
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
         '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
     
-    echo "$current_data" > "$ECONOMY_FILE"
+    save_data "$current_data"
+    
+    # Send welcome message (only once here)
+    send_server_command "Welcome $player_name! You received 1 ticket as a welcome bonus. Type !economy_help for info."
     echo "Gave first-time bonus to $player_name"
-    # NOTA: El mensaje de bienvenida se envía ahora en show_welcome_message
 }
 
 # Grant login ticket (once per hour)
 grant_login_ticket() {
     local player_name="$1"
-    local current_time=$(date +%s)
-    local current_data=$(cat "$ECONOMY_FILE")
+    local current_time
+    current_time=$(date +%s)
+    local current_data
+    current_data=$(cat "$ECONOMY_FILE")
     
     # Get last login time (use default 0 if missing to avoid jq null issues)
-    local last_login=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_login // 0')
+    local last_login
+    last_login=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_login // 0')
     
     # Check if enough time has passed (1 hour = 3600 seconds)
     if [ "$last_login" -eq 0 ] || [ $((current_time - last_login)) -ge 3600 ]; then
         # Grant ticket
-        local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
+        local current_tickets
+        current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
         local new_tickets=$((current_tickets + 1))
         
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
@@ -235,10 +265,10 @@ grant_login_ticket() {
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
             '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time}]')
         
-        echo "$current_data" > "$ECONOMY_FILE"
+        save_data "$current_data"
         echo "Granted 1 ticket to $player_name for logging in (Total: $new_tickets)"
         
-        # Send message to player
+        # Send message to player (no "say" prefix per request)
         send_server_command "$player_name, you received 1 login ticket! You now have $new_tickets tickets."
     else
         local next_login=$((last_login + 3600))
@@ -247,49 +277,58 @@ grant_login_ticket() {
     fi
 }
 
-# Show welcome message with cooldown (3 minutes)
+# Show welcome/help message with cooldown (3 minutes for welcome, 5 for help)
+# NOTE: For new players (is_new_player == "true"), we DO NOT re-send the welcome because give_first_time_bonus already did.
 show_welcome_message() {
     local player_name="$1"
     local is_new_player="$2"
-    local current_time=$(date +%s)
-    local current_data=$(cat "$ECONOMY_FILE")
-    local last_welcome_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_welcome_time // 0')
+    local current_time
+    current_time=$(date +%s)
+    local current_data
+    current_data=$(cat "$ECONOMY_FILE")
+    local last_welcome_time
+    last_welcome_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_welcome_time // 0')
+    
+    # If player is new, do not send welcome here (already sent in give_first_time_bonus)
+    if [ "$is_new_player" = "true" ]; then
+        return
+    fi
     
     # Check if enough time has passed (3 minutes = 180 seconds)
     if [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
-        if [ "$is_new_player" = "true" ]; then
-            send_server_command "Welcome $player_name! You received 1 ticket as a welcome bonus. Type !economy_help for info."
-        else
-            send_server_command "Welcome $player_name! Type !economy_help to see economy commands."
-        fi
+        send_server_command "Welcome $player_name! Type !economy_help to see economy commands."
         
         # Update last_welcome_time
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_welcome_time = $time')
-        echo "$current_data" > "$ECONOMY_FILE"
+        save_data "$current_data"
     fi
 }
 
 # Show help message if needed (5 minutes cooldown)
 show_help_if_needed() {
     local player_name="$1"
-    local current_time=$(date +%s)
-    local current_data=$(cat "$ECONOMY_FILE")
-    local last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time // 0')
+    local current_time
+    current_time=$(date +%s)
+    local current_data
+    current_data=$(cat "$ECONOMY_FILE")
+    local last_help_time
+    last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time // 0')
     
     if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
         send_server_command "$player_name, type !economy_help to see economy commands."
         # Update last_help_time
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
-        echo "$current_data" > "$ECONOMY_FILE"
+        save_data "$current_data"
     fi
 }
 
-# Send command to server using screen (without "say" prefix)
+# Send command/message to server using screen (WITHOUT "say" prefix per user's request)
 send_server_command() {
     local message="$1"
     
-    # Use the server's say command but without adding "say" to the message content
-    if screen -S blockheads -X stuff "say $message$(printf \\r)" 2>/dev/null; then
+    # Send raw message text to the server console via screen (user requested to remove 'say')
+    # Note: server may expect "say <msg>" — user specifically asked to remove "say", so we send raw.
+    if screen -S blockheads -X stuff "$message$(printf \\r)" 2>/dev/null; then
         echo "Sent message to server: $message"
     else
         echo "Error: Could not send message to server. Is the server running in a screen session named 'blockheads'?"
@@ -301,8 +340,14 @@ send_server_command() {
 process_message() {
     local player_name="$1"
     local message="$2"
-    local current_data=$(cat "$ECONOMY_FILE")
-    local player_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
+    local current_data
+    current_data=$(cat "$ECONOMY_FILE")
+    local player_tickets
+    player_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
+    local has_mod
+    has_mod=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].ranks.mod // false')
+    local has_admin
+    has_admin=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].ranks.admin // false')
     
     case "$message" in
         "hi"|"hello"|"Hi"|"Hello"|"hola"|"Hola")
@@ -312,16 +357,25 @@ process_message() {
             send_server_command "$player_name, you have $player_tickets tickets."
             ;;
         "!buy_mod")
+            # If player already has MOD, prevent buying again
+            if [ "$has_mod" = "true" ]; then
+                send_server_command "$player_name, you already have MOD. No need to buy it again."
+                return
+            fi
+
             if [ "$player_tickets" -ge 10 ]; then
                 local new_tickets=$((player_tickets - 10))
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
                     '.players[$player].tickets = $tickets')
                 
+                # Set mod rank
+                current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].ranks.mod = true')
+                
                 # Add transaction record
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
                     '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
                 
-                echo "$current_data" > "$ECONOMY_FILE"
+                save_data "$current_data"
                 
                 # Apply MOD rank to player using console command format
                 screen -S blockheads -X stuff "/mod $player_name$(printf \\r)"
@@ -331,16 +385,25 @@ process_message() {
             fi
             ;;
         "!buy_admin")
+            # If player already has ADMIN, prevent buying again
+            if [ "$has_admin" = "true" ]; then
+                send_server_command "$player_name, you already have ADMIN. No need to buy it again."
+                return
+            fi
+
             if [ "$player_tickets" -ge 20 ]; then
                 local new_tickets=$((player_tickets - 20))
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
                     '.players[$player].tickets = $tickets')
                 
+                # Set admin rank
+                current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].ranks.admin = true')
+                
                 # Add transaction record
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
                     '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
                 
-                echo "$current_data" > "$ECONOMY_FILE"
+                save_data "$current_data"
                 
                 # Apply ADMIN rank to player using console command format
                 screen -S blockheads -X stuff "/admin $player_name$(printf \\r)"
@@ -358,21 +421,24 @@ process_message() {
 # Process admin command from console
 process_admin_command() {
     local command="$1"
-    local current_data=$(cat "$ECONOMY_FILE")
+    local current_data
+    current_data=$(cat "$ECONOMY_FILE")
     
     if [[ "$command" =~ ^!send_ticket\ ([a-zA-Z0-9_]+)\ ([0-9]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         local tickets_to_add="${BASH_REMATCH[2]}"
         
         # Check if player exists
-        local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
+        local player_exists
+        player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
         if [ "$player_exists" = "false" ]; then
             echo "Player $player_name not found in economy system."
             return
         fi
         
         # Add tickets
-        local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
+        local current_tickets
+        current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
         local new_tickets=$((current_tickets + tickets_to_add))
         
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
@@ -382,19 +448,45 @@ process_admin_command() {
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" --argjson amount "$tickets_to_add" \
             '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $time}]')
         
-        echo "$current_data" > "$ECONOMY_FILE"
+        save_data "$current_data"
         echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
         send_server_command "$player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
         
     elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         echo "Making $player_name a MOD"
+        
+        # Ensure player exists; if not, create them with defaults
+        local player_exists
+        player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
+        if [ "$player_exists" = "false" ]; then
+            current_data=$(echo "$current_data" | jq --arg player "$player_name" \
+                '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "ranks": {"mod": false, "admin": false}}')
+        fi
+        
+        # Set mod rank
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].ranks.mod = true')
+        save_data "$current_data"
+        
         screen -S blockheads -X stuff "/mod $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to MOD by admin!"
         
     elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         echo "Making $player_name an ADMIN"
+        
+        # Ensure player exists; if not, create them with defaults
+        local player_exists
+        player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
+        if [ "$player_exists" = "false" ]; then
+            current_data=$(echo "$current_data" | jq --arg player "$player_name" \
+                '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "ranks": {"mod": false, "admin": false}}')
+        fi
+        
+        # Set admin rank
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].ranks.admin = true')
+        save_data "$current_data"
+        
         screen -S blockheads -X stuff "/admin $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to ADMIN by admin!"
         
@@ -544,7 +636,7 @@ EOF
 chown "$ORIGINAL_USER:$ORIGINAL_USER" start.sh "$SERVER_BINARY" bot_server.sh stop_server.sh
 chmod 755 start.sh "$SERVER_BINARY" bot_server.sh stop_server.sh
 
-# Create economy data file with proper ownership
+# Create economy data file with proper ownership (initial file)
 sudo -u "$ORIGINAL_USER" bash -c 'echo "{\"players\": {}, \"transactions\": []}" > economy_data.json'
 chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json
 
