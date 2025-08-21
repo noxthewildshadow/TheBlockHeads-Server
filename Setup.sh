@@ -45,16 +45,16 @@ patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 "$SERVER_BINARY"
 patchelf --replace-needed libffi.so.6 libffi.so.8 "$SERVER_BINARY"
 patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 "$SERVER_BINARY"
 patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 "$SERVER_BINARY"
-patchelf --replace-needed libicudata.so.48 libicudata.so.70 "$SERVER_BINARY"
+patchelf --replace-needed libicudata.so.48 libicudata.so.70 "$SERVER_Binary"
 patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY"
 
 echo "[5/7] Creating start script..."
 cat > start.sh << 'EOF'
 #!/bin/bash
 
-# Configurable settings
-world_id="83cad395edb8d0f1912fec89508d8a1d"
-server_port=15151
+# Configurable settings - USER MUST CHANGE THESE!
+world_id="HERE_YOUR_WORLD_ID"
+server_port=12153
 
 # Directories and paths
 log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id"
@@ -78,12 +78,22 @@ if [ ! -x "$server_binary" ]; then
     chmod +x "$server_binary"
 fi
 
+echo "================================================================"
 echo "Starting The Blockheads Server"
-echo "World: $world_id"
+echo "================================================================"
+echo "World ID: $world_id (Change this in start.sh if needed)"
 echo "Port: $server_port"
 echo "Logs: $log_file"
-echo "Use Ctrl+C to stop the server"
-echo "----------------------------------------"
+echo ""
+echo "IMPORTANT FOR NEW WORLDS:"
+echo "1. If this is your first time, you need to create a world first!"
+echo "2. Join the server from your game to generate the world"
+echo "3. Stop the server with Ctrl+C once the world is created"
+echo "4. Edit start.sh to change 'HERE_YOUR_WORLD_ID' to your actual world ID"
+echo "5. Restart the server"
+echo ""
+echo "To stop the server: Press Ctrl+C"
+echo "================================================================"
 
 # Function to clean up on exit
 cleanup() {
@@ -133,7 +143,7 @@ add_player_if_new() {
     local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
     
     if [ "$player_exists" = "false" ]; then
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_help_time": 0}')
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0}')
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Added new player: $player_name"
         
@@ -158,7 +168,7 @@ give_first_time_bonus() {
     
     echo "$current_data" > "$ECONOMY_FILE"
     echo "Gave first-time bonus to $player_name"
-    send_server_command "say Welcome $player_name! You received 1 ticket as a welcome bonus. Type !economy_help for info."
+    send_server_command "$player_name! You received 1 ticket as a welcome bonus. Type !economy_help for info."
 }
 
 # Grant login ticket (once per hour)
@@ -189,11 +199,27 @@ grant_login_ticket() {
         echo "Granted 1 ticket to $player_name for logging in (Total: $new_tickets)"
         
         # Send message to player
-        send_server_command "say $player_name, you received 1 login ticket! You now have $new_tickets tickets."
+        send_server_command "$player_name, you received 1 login ticket! You now have $new_tickets tickets."
     else
         local next_login=$((last_login + 3600))
         local time_left=$((next_login - current_time))
         echo "$player_name must wait $((time_left / 60)) minutes for next ticket"
+    fi
+}
+
+# Show welcome message with cooldown (3 minutes)
+show_welcome_message() {
+    local player_name="$1"
+    local current_time=$(date +%s)
+    local current_data=$(cat "$ECONOMY_FILE")
+    local last_welcome_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_welcome_time')
+    
+    # Check if enough time has passed (3 minutes = 180 seconds)
+    if [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
+        send_server_command "Welcome $player_name! Type !economy_help to see economy commands."
+        # Update last_welcome_time
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_welcome_time = $time')
+        echo "$current_data" > "$ECONOMY_FILE"
     fi
 }
 
@@ -205,22 +231,22 @@ show_help_if_needed() {
     local last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time')
     
     if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
-        send_server_command "say $player_name, type !economy_help to see economy commands."
+        send_server_command "$player_name, type !economy_help to see economy commands."
         # Update last_help_time
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
         echo "$current_data" > "$ECONOMY_FILE"
     fi
 }
 
-# Send command to server using screen
+# Send command to server using screen (without "say" prefix)
 send_server_command() {
-    local command="$1"
+    local message="$1"
     
-    # Try to send command via screen
-    if screen -S blockheads -X stuff "$command$(printf \\r)" 2>/dev/null; then
-        echo "Sent command to server: $command"
+    # Use the server's say command but without adding "say" to the message content
+    if screen -S blockheads -X stuff "say $message$(printf \\r)" 2>/dev/null; then
+        echo "Sent message to server: $message"
     else
-        echo "Error: Could not send command to server. Is the server running in a screen session named 'blockheads'?"
+        echo "Error: Could not send message to server. Is the server running in a screen session named 'blockheads'?"
         echo "Start the server with: screen -S blockheads -d -m ./start.sh"
     fi
 }
@@ -234,10 +260,10 @@ process_message() {
     
     case "$message" in
         "hi"|"hello"|"Hi"|"Hello"|"hola"|"Hola")
-            send_server_command "say Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
+            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
             ;;
         "!tickets")
-            send_server_command "say $player_name, you have $player_tickets tickets."
+            send_server_command "$player_name, you have $player_tickets tickets."
             ;;
         "!buy_mod")
             if [ "$player_tickets" -ge 10 ]; then
@@ -252,10 +278,10 @@ process_message() {
                 echo "$current_data" > "$ECONOMY_FILE"
                 
                 # Apply MOD rank to player using console command format
-                send_server_command "/mod $player_name"
-                send_server_command "say Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
+                screen -S blockheads -X stuff "/mod $player_name$(printf \\r)"
+                send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
-                send_server_command "say $player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
+                send_server_command "$player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
             fi
             ;;
         "!buy_admin")
@@ -271,14 +297,14 @@ process_message() {
                 echo "$current_data" > "$ECONOMY_FILE"
                 
                 # Apply ADMIN rank to player using console command format
-                send_server_command "/admin $player_name"
-                send_server_command "say Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
+                screen -S blockheads -X stuff "/admin $player_name$(printf \\r)"
+                send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
             else
-                send_server_command "say $player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
+                send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
             fi
             ;;
         "!economy_help")
-            send_server_command "say Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN)"
+            send_server_command "Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN)"
             ;;
     esac
 }
@@ -312,19 +338,19 @@ process_admin_command() {
         
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
-        send_server_command "say $player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
+        send_server_command "$player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
         
     elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         echo "Making $player_name a MOD"
-        send_server_command "/mod $player_name"
-        send_server_command "say $player_name has been promoted to MOD by admin!"
+        screen -S blockheads -X stuff "/mod $player_name$(printf \\r)"
+        send_server_command "$player_name has been promoted to MOD by admin!"
         
     elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         echo "Making $player_name an ADMIN"
-        send_server_command "/admin $player_name"
-        send_server_command "say $player_name has been promoted to ADMIN by admin!"
+        screen -S blockheads -X stuff "/admin $player_name$(printf \\r)"
+        send_server_command "$player_name has been promoted to ADMIN by admin!"
         
     else
         echo "Unknown admin command: $command"
@@ -389,10 +415,7 @@ monitor_log() {
             echo "Player connected: $player_name"
             add_player_if_new "$player_name"
             grant_login_ticket "$player_name"
-            show_help_if_needed "$player_name"
-            
-            # Enviar mensaje de bienvenida inmediatamente
-            send_server_command "say Welcome $player_name! Type !economy_help to see economy commands."
+            show_welcome_message "$player_name"
             continue
         fi
 
@@ -428,7 +451,7 @@ if [ $# -eq 1 ]; then
 else
     echo "Usage: $0 <server_log_file>"
     echo "Please provide the path to the server log file"
-    echo "Example: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/83cad395edb8d0f1912fec89508d8a1d/console.log"
+    echo "Example: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/HERE_YOUR_WORLD_ID/console.log"
     exit 1
 fi
 EOF
@@ -466,7 +489,7 @@ echo "To detach from console: Ctrl+A then D"
 echo ""
 echo "To start the economy bot run: ./bot_server.sh <path_to_log_file>"
 echo ""
-echo "Example for bot: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/83cad395edb8d0f1912fec89508d8a1d/console.log"
+echo "Example for bot: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/HERE_YOUR_WORLD_ID/console.log"
 echo ""
 echo "To stop everything: ./stop_server.sh"
 echo ""
