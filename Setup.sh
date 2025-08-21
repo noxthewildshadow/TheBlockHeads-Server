@@ -181,7 +181,7 @@ add_player_if_new() {
     local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
     
     if [ "$player_exists" = "false" ]; then
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0}')
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Added new player: $player_name"
         
@@ -296,6 +296,30 @@ send_server_command() {
     fi
 }
 
+# Check if player has already purchased an item
+has_purchased() {
+    local player_name="$1"
+    local item="$2"
+    local current_data=$(cat "$ECONOMY_FILE")
+    local has_item=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases | index($item) != null')
+    
+    if [ "$has_item" = "true" ]; then
+        return 0  # Player has purchased this item
+    else
+        return 1  # Player has not purchased this item
+    fi
+}
+
+# Add purchase to player's record
+add_purchase() {
+    local player_name="$1"
+    local item="$2"
+    local current_data=$(cat "$ECONOMY_FILE")
+    
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases += [$item]')
+    echo "$current_data" > "$ECONOMY_FILE"
+}
+
 # Process player message
 process_message() {
     local player_name="$1"
@@ -311,10 +335,15 @@ process_message() {
             send_server_command "$player_name, you have $player_tickets tickets."
             ;;
         "!buy_mod")
-            if [ "$player_tickets" -ge 10 ]; then
+            if has_purchased "$player_name" "mod"; then
+                send_server_command "$player_name, you already have MOD rank. No need to purchase again."
+            elif [ "$player_tickets" -ge 10 ]; then
                 local new_tickets=$((player_tickets - 10))
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
                     '.players[$player].tickets = $tickets')
+                
+                # Add purchase record
+                add_purchase "$player_name" "mod"
                 
                 # Add transaction record
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
@@ -330,10 +359,15 @@ process_message() {
             fi
             ;;
         "!buy_admin")
-            if [ "$player_tickets" -ge 20 ]; then
+            if has_purchased "$player_name" "admin"; then
+                send_server_command "$player_name, you already have ADMIN rank. No need to purchase again."
+            elif [ "$player_tickets" -ge 20 ]; then
                 local new_tickets=$((player_tickets - 20))
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
                     '.players[$player].tickets = $tickets')
+                
+                # Add purchase record
+                add_purchase "$player_name" "admin"
                 
                 # Add transaction record
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
@@ -452,6 +486,9 @@ monitor_log() {
         echo "$admin_command" > "$admin_pipe"
     done &
     
+    # Track if we've already shown welcome for this session
+    declare -A welcome_shown
+    
     # Monitor log file for player activity
     tail -n 0 -F "$log_file" | filter_server_log | while read line; do
         # Detect player connections (formato específico del log)
@@ -472,10 +509,16 @@ monitor_log() {
                 is_new_player="true"
             fi
             
-            # Solo mostrar mensaje de bienvenida si es nuevo jugador
+            # Solo mostrar mensaje de bienvenida si es nuevo jugador o si no se ha mostrado en esta sesión
             if [ "$is_new_player" = "true" ]; then
                 show_welcome_message "$player_name" "$is_new_player"
+                welcome_shown["$player_name"]=1
             else
+                # Solo mostrar mensaje de bienvenida si no se ha mostrado en esta sesión
+                if [ -z "${welcome_shown[$player_name]}" ]; then
+                    show_welcome_message "$player_name" "$is_new_player"
+                    welcome_shown["$player_name"]=1
+                fi
                 grant_login_ticket "$player_name"
             fi
             continue
@@ -491,6 +534,8 @@ monitor_log() {
             fi
             
             echo "Player disconnected: $player_name"
+            # Remove from welcome shown tracking
+            unset welcome_shown["$player_name"]
             continue
         fi
         
