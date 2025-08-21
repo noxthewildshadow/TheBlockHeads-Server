@@ -333,15 +333,31 @@ monitor_log() {
     echo "Starting economy bot. Monitoring: $log_file"
     echo "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
     echo "Admin commands: !send_ticket <player> <amount>"
-    echo "To send admin commands, type them and press Enter:"
+    echo "================================================================"
+    echo "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
+    echo "Type admin commands below and press Enter:"
+    echo "================================================================"
     
-    # Start reading from stdin for admin commands
-    while read -r admin_command; do
+    # Use a named pipe for admin commands to avoid blocking issues
+    local admin_pipe="/tmp/blockheads_admin_pipe"
+    rm -f "$admin_pipe"
+    mkfifo "$admin_pipe"
+    
+    # Start reading from admin pipe in background
+    while read -r admin_command < "$admin_pipe"; do
+        echo "Processing admin command: $admin_command"
         if [[ "$admin_command" == "!send_ticket "* ]]; then
             process_admin_command "$admin_command"
         else
             echo "Unknown admin command. Use: !send_ticket <player> <amount>"
         fi
+        echo "================================================================"
+        echo "Ready for next admin command:"
+    done &
+    
+    # Also read from stdin and write to the pipe
+    while read -r admin_command; do
+        echo "$admin_command" > "$admin_pipe"
     done &
     
     # Monitor log file for player activity
@@ -368,6 +384,10 @@ monitor_log() {
         
         echo "Other log line: $line"
     done
+    
+    # Cleanup
+    wait
+    rm -f "$admin_pipe"
 }
 
 # Main execution
@@ -429,7 +449,7 @@ echo ""
 echo "IMPORTANT: For the bot to work properly, you MUST:"
 echo "1. Start the server in a screen session: screen -S blockheads -d -m ./start.sh"
 echo "2. In a new terminal, start the bot with the correct log file path"
-echo "3. To send admin commands, type them in the bot terminal"
+echo "3. To send admin commands, type them in the BOT terminal (where ./bot_server.sh is running)"
 echo ""
 echo "ADDITIONAL TIPS:"
 echo "- If you encounter an error like 'there is already a screen with the same host', use: killall screen"
