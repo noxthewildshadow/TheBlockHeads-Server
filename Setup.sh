@@ -163,14 +163,15 @@ cat > bot_server.sh << 'EOF'
 #!/bin/bash
 
 # Bot configuration
-ECONOMY_FILE="economy_data.json"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ECONOMY_FILE="$SCRIPT_DIR/economy_data.json"
 SCAN_INTERVAL=5
 
 # Initialize economy data file if it doesn't exist
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
         echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
-        echo "Economy data file created."
+        echo "Economy data file created at: $ECONOMY_FILE"
     fi
 }
 
@@ -257,8 +258,8 @@ show_welcome_message() {
     # Check if enough time has passed (3 minutes = 180 seconds)
     if [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
         if [ "$is_new_player" = "true" ]; then
-            # Don't send welcome message for new players - the server does this automatically
-            echo "Server will handle welcome message for new player: $player_name"
+            # Send welcome message for new players
+            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
         else
             send_server_command "Welcome back $player_name! Type !economy_help to see economy commands."
         fi
@@ -345,9 +346,6 @@ process_message() {
     local player_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
     
     case "$message" in
-        "hi"|"hello"|"Hi"|"Hello"|"hola"|"Hola")
-            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
-            ;;
         "!tickets")
             send_server_command "$player_name, you have $player_tickets tickets."
             ;;
