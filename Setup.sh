@@ -217,13 +217,13 @@ grant_login_ticket() {
     local current_time=$(date +%s)
     local current_data=$(cat "$ECONOMY_FILE")
     
-    # Get last login time
-    local last_login=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_login')
+    # Get last login time (use default 0 if missing to avoid jq null issues)
+    local last_login=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_login // 0')
     
     # Check if enough time has passed (1 hour = 3600 seconds)
     if [ "$last_login" -eq 0 ] || [ $((current_time - last_login)) -ge 3600 ]; then
         # Grant ticket
-        local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
+        local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
         local new_tickets=$((current_tickets + 1))
         
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
@@ -253,7 +253,7 @@ show_welcome_message() {
     local is_new_player="$2"
     local current_time=$(date +%s)
     local current_data=$(cat "$ECONOMY_FILE")
-    local last_welcome_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_welcome_time')
+    local last_welcome_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_welcome_time // 0')
     
     # Check if enough time has passed (3 minutes = 180 seconds)
     if [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
@@ -274,7 +274,7 @@ show_help_if_needed() {
     local player_name="$1"
     local current_time=$(date +%s)
     local current_data=$(cat "$ECONOMY_FILE")
-    local last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time')
+    local last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time // 0')
     
     if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
         send_server_command "$player_name, type !economy_help to see economy commands."
@@ -302,7 +302,7 @@ process_message() {
     local player_name="$1"
     local message="$2"
     local current_data=$(cat "$ECONOMY_FILE")
-    local player_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
+    local player_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
     
     case "$message" in
         "hi"|"hello"|"Hi"|"Hello"|"hola"|"Hola")
@@ -372,7 +372,7 @@ process_admin_command() {
         fi
         
         # Add tickets
-        local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
+        local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets // 0')
         local new_tickets=$((current_tickets + tickets_to_add))
         
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
@@ -437,7 +437,7 @@ monitor_log() {
     mkfifo "$admin_pipe"
     
     # Start reading from admin pipe in background
-    while read -r admin_command < "$admin_pipe"; then
+    while read -r admin_command < "$admin_pipe"; do
         echo "Processing admin command: $admin_command"
         if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]]; then
             process_admin_command "$admin_command"
@@ -447,12 +447,12 @@ monitor_log() {
         echo "================================================================"
         echo "Ready for next admin command:"
     done &
-    
+
     # Also read from stdin and write to the pipe
     while read -r admin_command; do
         echo "$admin_command" > "$admin_pipe"
     done &
-    
+
     # Monitor log file for player activity
     tail -n 0 -F "$log_file" | filter_server_log | while read line; do
         # Detect player connections (formato específico del log)
