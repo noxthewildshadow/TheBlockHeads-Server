@@ -2,53 +2,48 @@
 set -e
 
 if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: Este script requiere privilegios de root."
-    echo "Por favor, ejecuta con: sudo $0"
+    echo "ERROR: This script requires root privileges."
+    echo "Please run with: sudo $0"
     exit 1
 fi
 
 ORIGINAL_USER=${SUDO_USER:-$USER}
-if [ -z "$ORIGINAL_USER" ] || [ "$ORIGINAL_USER" = "root" ]; then
-    echo "ERROR: No se pudo determinar el usuario original."
-    echo "Por favor, ejecuta con: sudo -u tu_usuario $0"
-    exit 1
-fi
+HOME_DIR=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6)
 
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 TEMP_FILE="/tmp/blockheads_server171.tar.gz"
 SERVER_BINARY="blockheads_server171"
 
 echo "================================================================"
-echo "Instalador de Servidor The Blockheads para Linux"
+echo "The Blockheads Linux Server Installer"
 echo "================================================================"
 
-echo "[1/6] Instalando paquetes requeridos..."
+echo "[1/6] Installing required packages..."
 {
     add-apt-repository multiverse -y
     apt-get update -y
-    apt-get install -y software-properties-common libgnustep-base1.28 libdispatch-dev patchelf wget jq screen
+    apt-get install -y libgnustep-base1.28 libdispatch-dev patchelf wget jq screen libicu70
 } > /dev/null 2>&1
 
-echo "[2/6] Descargando servidor..."
-if ! wget -q "$SERVER_URL" -O "$TEMP_FILE"; then
-    echo "ERROR: Falló la descarga del servidor."
+echo "[2/6] Downloading server..."
+wget -q --show-progress "$SERVER_URL" -O "$TEMP_FILE"
+
+if [ ! -s "$TEMP_FILE" ]; then
+    echo "ERROR: Failed to download server file"
     exit 1
 fi
 
-echo "[3/6] Extrayendo archivos..."
-if ! tar xzf "$TEMP_FILE" -C . --no-same-owner; then
-    echo "ERROR: Falló la extracción del archivo."
-    exit 1
-fi
-
-if [ ! -f "$SERVER_BINARY" ]; then
-    echo "ERROR: No se encontró el binario del servidor después de la extracción."
-    exit 1
-fi
-
+echo "[3/6] Extracting files..."
+tar xzf "$TEMP_FILE" -C .
 chmod +x "$SERVER_BINARY"
 
-echo "[4/6] Configurando compatibilidad de bibliotecas..."
+echo "[4/6] Configuring library compatibility..."
+# Check if binary exists before patching
+if [ ! -f "$SERVER_BINARY" ]; then
+    echo "ERROR: Server binary not found after extraction"
+    exit 1
+fi
+
 patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SERVER_BINARY" 2>/dev/null || true
 patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SERVER_BINARY" 2>/dev/null || true
 patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 "$SERVER_BINARY" 2>/dev/null || true
@@ -59,26 +54,31 @@ patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 "$SERVER_BINARY" 2>/dev/
 patchelf --replace-needed libicudata.so.48 libicudata.so.70 "$SERVER_BINARY" 2>/dev/null || true
 patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY" 2>/dev/null || true
 
-echo "[5/6] Creando script de inicio..."
+echo "[5/6] Creating start script..."
 cat > start.sh << 'EOF'
 #!/bin/bash
 
 world_id="83cad395edb8d0f1912fec89508d8a1d"
 server_port=12153
 
-log_dir="$HOME/GNUstep/Library/Application Support/TheBlockheads/saves/$world_id"
+log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id"
 log_file="$log_dir/console.log"
 server_binary="./blockheads_server171"
 
+# Change to script directory
 cd "$(dirname "$0")"
 
+# Clean up any existing screen sessions
+screen -S blockheads -X quit 2>/dev/null || true
+
+# Check and create log directory
 if [ ! -d "$log_dir" ]; then
     mkdir -p "$log_dir"
     chmod 755 "$log_dir"
 fi
 
 if [ ! -f "$server_binary" ]; then
-    echo "Error: No se encuentra el ejecutable del servidor $server_binary"
+    echo "Error: Cannot find server executable $server_binary"
     exit 1
 fi
 
@@ -87,45 +87,48 @@ if [ ! -x "$server_binary" ]; then
 fi
 
 echo "========================================"
-echo "    Servidor The Blockheads"
+echo "    The Blockheads Server"
 echo "========================================"
-echo "ID Mundo: $world_id"
-echo "Puerto: $server_port"
+echo "World ID: $world_id"
+echo "Port: $server_port"
 echo "Logs: $log_file"
 echo "========================================"
-echo "Servidor iniciando en 3 segundos..."
+echo "Server starting in 3 seconds..."
 sleep 3
 
 restart_count=0
 while true; do
     restart_count=$((restart_count + 1))
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] Iniciando servidor (reinicio #$restart_count)" | tee -a "$log_file"
+    echo "[$timestamp] Starting server (restart #$restart_count)" | tee -a "$log_file"
     
+    # Run server in the background
     $server_binary -o "$world_id" -p "$server_port" >> "$log_file" 2>&1 &
     SERVER_PID=$!
     
+    # Wait for server to exit
     wait $SERVER_PID
     exit_code=$?
     
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] Servidor cerrado (código de salida: $exit_code), reiniciando en 3s..." | tee -a "$log_file"
+    echo "[$timestamp] Server closed (exit code: $exit_code), restarting in 3s..." | tee -a "$log_file"
     sleep 3
 done
 EOF
 
-echo "[6/6] Creando script del bot..."
+echo "[6/6] Creating bot server script..."
 cat > bot_server.sh << 'EOF'
 #!/bin/bash
 
 ECONOMY_FILE="economy_data.json"
 
+# Change to script directory
 cd "$(dirname "$0")"
 
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
         echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
-        echo "Archivo de economía creado."
+        echo "Economy data file created."
     fi
 }
 
@@ -137,7 +140,7 @@ add_player_if_new() {
     if [ "$player_exists" = "false" ]; then
         current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_help_time": 0}')
         echo "$current_data" > "$ECONOMY_FILE"
-        echo "Jugador añadido: $player_name"
+        echo "Added new player: $player_name"
         give_first_time_bonus "$player_name"
     fi
 }
@@ -154,8 +157,8 @@ give_first_time_bonus() {
         '.transactions += [{"player": $player, "type": "first_time_bonus", "tickets": 1, "time": $time}]')
     
     echo "$current_data" > "$ECONOMY_FILE"
-    echo "Bono de bienvenida para $player_name"
-    send_server_command "say ¡Bienvenido $player_name! Recibiste 1 ticket de regalo. Escribe !economy_help para más información."
+    echo "Gave first-time bonus to $player_name"
+    send_server_command "say Welcome $player_name! You received 1 ticket as a first-time bonus. Type !economy_help for info."
 }
 
 grant_login_ticket() {
@@ -178,12 +181,12 @@ grant_login_ticket() {
             '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time}]')
         
         echo "$current_data" > "$ECONOMY_FILE"
-        echo "Ticket de login para $player_name (Total: $new_tickets)"
-        send_server_command "say $player_name, ¡recibiste 1 ticket por conectarte! Ahora tienes $new_tickets tickets."
+        echo "Granted 1 ticket to $player_name for logging in (Total: $new_tickets)"
+        send_server_command "say $player_name, you received 1 login ticket! You now have $new_tickets tickets."
     else
         local next_login=$((last_login + 3600))
         local time_left=$((next_login - current_time))
-        echo "$player_name debe esperar $((time_left / 60)) minutos para el próximo ticket"
+        echo "$player_name must wait $((time_left / 60)) minutes for next ticket"
     fi
 }
 
@@ -194,7 +197,7 @@ show_help_if_needed() {
     local last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time')
     
     if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
-        send_server_command "say $player_name, escribe !economy_help para ver comandos de economía."
+        send_server_command "say $player_name, type !economy_help to see economy commands."
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
         echo "$current_data" > "$ECONOMY_FILE"
     fi
@@ -203,12 +206,12 @@ show_help_if_needed() {
 send_server_command() {
     local command="$1"
     
-    if [ -p "server_pipe" ]; then
-        echo "$command" > server_pipe &
-        echo "Comando enviado: $command"
+    # Try to send command via screen
+    if screen -S blockheads -X stuff "$command$(printf \\r)" 2>/dev/null; then
+        echo "Sent command to server: $command"
     else
-        echo "Advertencia: No se pudo enviar comando. Named pipe no encontrado."
-        echo "Comando: $command"
+        echo "Warning: Could not send command to server. Is the server running in screen?"
+        echo "Command: $command"
     fi
 }
 
@@ -220,10 +223,10 @@ process_message() {
     
     case "$message" in
         "hi"|"hello"|"Hi"|"Hello"|"hey"|"Hey")
-            send_server_command "say ¡Bienvenido al servidor, $player_name! Escribe !tickets para ver tus tickets."
+            send_server_command "say Welcome to the server, $player_name! Type !tickets to check your balance."
             ;;
         "!tickets")
-            send_server_command "say $player_name, tienes $player_tickets tickets."
+            send_server_command "say $player_name, you have $player_tickets tickets."
             ;;
         "!buy_mod")
             if [ "$player_tickets" -ge 10 ]; then
@@ -236,9 +239,9 @@ process_message() {
                 
                 echo "$current_data" > "$ECONOMY_FILE"
                 send_server_command "mod $player_name"
-                send_server_command "say $player_name ha sido promovido a MOD por 10 tickets! Tickets restantes: $new_tickets"
+                send_server_command "say $player_name has been promoted to MOD for 10 tickets! Remaining tickets: $new_tickets"
             else
-                send_server_command "say $player_name, necesitas $((10 - player_tickets)) tickets más para comprar MOD."
+                send_server_command "say $player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
             fi
             ;;
         "!buy_admin")
@@ -252,13 +255,13 @@ process_message() {
                 
                 echo "$current_data" > "$ECONOMY_FILE"
                 send_server_command "admin $player_name"
-                send_server_command "say $player_name ha sido promovido a ADMIN por 20 tickets! Tickets restantes: $new_tickets"
+                send_server_command "say $player_name has been promoted to ADMIN for 20 tickets! Remaining tickets: $new_tickets"
             else
-                send_server_command "say $player_name, necesitas $((20 - player_tickets)) tickets más para comprar ADMIN."
+                send_server_command "say $player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
             fi
             ;;
         "!economy_help")
-            send_server_command "say Comandos de economía: !tickets (ver tickets), !buy_mod (10 tickets para MOD), !buy_admin (20 tickets para ADMIN)"
+            send_server_command "say Economy commands: !tickets (check balance), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN)"
             ;;
     esac
 }
@@ -273,7 +276,7 @@ process_admin_command() {
         
         local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
         if [ "$player_exists" = "false" ]; then
-            echo "Jugador $player_name no encontrado."
+            echo "Player $player_name not found in economy system."
             return
         fi
         
@@ -287,10 +290,10 @@ process_admin_command() {
             '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $time}]')
         
         echo "$current_data" > "$ECONOMY_FILE"
-        echo "$tickets_to_add tickets añadidos a $player_name (Total: $new_tickets)"
-        send_server_command "say $player_name recibió $tickets_to_add tickets del admin! Total: $new_tickets"
+        echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
+        send_server_command "say $player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
     else
-        echo "Comando admin desconocido: $command"
+        echo "Unknown admin command: $command"
     fi
 }
 
@@ -306,34 +309,29 @@ filter_server_log() {
 monitor_log() {
     local log_file="$1"
     echo "========================================"
-    echo "     Bot de Economía The Blockheads"
+    echo "     The Blockheads Economy Bot"
     echo "========================================"
-    echo "Monitoreando: $log_file"
-    echo "Comandos: !tickets, !buy_mod, !buy_admin, !economy_help"
-    echo "Comandos admin: !send_ticket <jugador> <cantidad>"
+    echo "Monitoring: $log_file"
+    echo "Player commands: !tickets, !buy_mod, !buy_admin, !economy_help"
+    echo "Admin commands: !send_ticket <player> <amount>"
     echo "========================================"
-    echo "Para enviar comandos admin, escríbelos abajo:"
-    
-    if [ ! -p "server_pipe" ]; then
-        mkfifo "server_pipe"
-        echo "Named pipe creado para comunicación"
-    fi
+    echo "To send admin commands, type them below:"
     
     while read -r admin_command; do
         if [[ "$admin_command" == "!send_ticket "* ]]; then
             process_admin_command "$admin_command"
         elif [[ "$admin_command" == "quit" ]]; then
-            echo "Deteniendo bot..."
+            echo "Stopping bot..."
             exit 0
         else
-            echo "Comando desconocido. Usa: !send_ticket <jugador> <cantidad>"
+            echo "Unknown admin command. Use: !send_ticket <player> <amount>"
         fi
     done &
     
     tail -n 0 -F "$log_file" | filter_server_log | while read line; do
         if [[ "$line" =~ ([a-zA-Z0-9_]+)\ connected\.$ ]]; then
             local player_name="${BASH_REMATCH[1]}"
-            echo "Jugador conectado: $player_name"
+            echo "Player connected: $player_name"
             add_player_if_new "$player_name"
             grant_login_ticket "$player_name"
             show_help_if_needed "$player_name"
@@ -351,7 +349,7 @@ monitor_log() {
         
         if [[ "$line" =~ Console:\ (!send_ticket\ [a-zA-Z0-9_]+\ [0-9]+) ]]; then
             local admin_command="${BASH_REMATCH[1]}"
-            echo "Comando admin desde consola: $admin_command"
+            echo "Admin command from console: $admin_command"
             process_admin_command "$admin_command"
             continue
         fi
@@ -362,9 +360,9 @@ if [ $# -eq 1 ]; then
     initialize_economy
     monitor_log "$1"
 else
-    echo "Uso: $0 <archivo_log_servidor>"
-    echo "Proporciona la ruta al archivo de log del servidor"
-    echo "Ejemplo: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/83cad395edb8d0f1912fec89508d8a1d/console.log"
+    echo "Usage: $0 <server_log_file>"
+    echo "Please provide the path to the server log file"
+    echo "Example: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/83cad395edb8d0f1912fec89508d8a1d/console.log"
     exit 1
 fi
 EOF
@@ -378,29 +376,30 @@ chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json
 rm -f "$TEMP_FILE"
 
 echo "================================================================"
-echo "¡Instalación completada correctamente!"
+echo "Installation completed successfully!"
 echo "================================================================"
-echo "Para ver comandos del servidor: ./blockheads_server171 --help"
+echo "To see server commands: ./blockheads_server171 --help"
 echo ""
-echo "Para iniciar el servidor:"
-echo "  ./start.sh"
+echo "To start the server:"
+echo "  screen -S blockheads ./start.sh"
 echo ""
-echo "Para iniciar el bot de economía:"
-echo "  ./bot_server.sh ~/GNUstep/Library/Application Support/TheBlockheads/saves/83cad395edb8d0f1912fec89508d8a1d/console.log"
+echo "To start the economy bot:"
+echo "  ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/83cad395edb8d0f1912fec89508d8a1d/console.log"
 echo ""
-echo "Para detener todo:"
+echo "To stop everything:"
 echo "  pkill -f blockheads_server171"
 echo "================================================================"
-echo "Características del Sistema de Economía:"
-echo "  - Jugadores nuevos reciben 1 ticket inmediatamente"
-echo "  - Jugadores reciben 1 ticket cada hora al conectarse"
-echo "  - Comandos: !tickets, !buy_mod (10), !buy_admin (20)"
-echo "  - Comandos admin: !send_ticket <jugador> <cantidad>"
+echo "Economy System Features:"
+echo "  - First-time players get 1 ticket immediately"
+echo "  - Players get 1 ticket every hour when they connect"
+echo "  - Commands: !tickets, !buy_mod (10), !buy_admin (20)"
+echo "  - Admin commands: !send_ticket <player> <amount>"
 echo "================================================================"
-echo "Verificando ejecutable..."
+echo "Verifying executable..."
 if sudo -u "$ORIGINAL_USER" ./blockheads_server171 --help > /dev/null 2>&1; then
-    echo "Estado: Ejecutable verificado correctamente"
+    echo "Status: Executable verified successfully"
 else
-    echo "Advertencia: El ejecutable podría tener problemas de compatibilidad"
+    echo "Warning: The executable might have compatibility issues"
+    echo "You may need to manually install additional dependencies"
 fi
 echo "================================================================"
