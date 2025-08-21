@@ -250,7 +250,9 @@ process_message() {
                     '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
                 
                 echo "$current_data" > "$ECONOMY_FILE"
-                send_server_command "mod $player_name"
+                
+                # Apply MOD rank to player using console command format
+                send_server_command "/mod $player_name"
                 send_server_command "say Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
                 send_server_command "say $player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
@@ -267,7 +269,9 @@ process_message() {
                     '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
                 
                 echo "$current_data" > "$ECONOMY_FILE"
-                send_server_command "admin $player_name"
+                
+                # Apply ADMIN rank to player using console command format
+                send_server_command "/admin $player_name"
                 send_server_command "say Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
             else
                 send_server_command "say $player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
@@ -309,8 +313,25 @@ process_admin_command() {
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
         send_server_command "say $player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
+        
+    elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
+        local player_name="${BASH_REMATCH[1]}"
+        echo "Making $player_name a MOD"
+        send_server_command "/mod $player_name"
+        send_server_command "say $player_name has been promoted to MOD by admin!"
+        
+    elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
+        local player_name="${BASH_REMATCH[1]}"
+        echo "Making $player_name an ADMIN"
+        send_server_command "/admin $player_name"
+        send_server_command "say $player_name has been promoted to ADMIN by admin!"
+        
     else
         echo "Unknown admin command: $command"
+        echo "Available admin commands:"
+        echo "!send_ticket <player> <amount>"
+        echo "!make_mod <player>"
+        echo "!make_admin <player>"
     fi
 }
 
@@ -332,7 +353,7 @@ monitor_log() {
     local log_file="$1"
     echo "Starting economy bot. Monitoring: $log_file"
     echo "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
-    echo "Admin commands: !send_ticket <player> <amount>"
+    echo "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
     echo "================================================================"
     echo "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
     echo "Type admin commands below and press Enter:"
@@ -346,10 +367,10 @@ monitor_log() {
     # Start reading from admin pipe in background
     while read -r admin_command < "$admin_pipe"; do
         echo "Processing admin command: $admin_command"
-        if [[ "$admin_command" == "!send_ticket "* ]]; then
+        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]]; then
             process_admin_command "$admin_command"
         else
-            echo "Unknown admin command. Use: !send_ticket <player> <amount>"
+            echo "Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, or !make_admin <player>"
         fi
         echo "================================================================"
         echo "Ready for next admin command:"
@@ -453,7 +474,7 @@ echo "The economy bot features:"
 echo "- Players get 1 ticket every hour when they connect"
 echo "- New players get 1 ticket immediately"
 echo "- Commands: !tickets, !buy_mod (10), !buy_admin (20)"
-echo "- Admin commands: !send_ticket <player> <amount>"
+echo "- Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
 echo "- Economy data saved in: economy_data.json"
 echo ""
 echo "IMPORTANT: For the bot to work properly, you MUST:"
