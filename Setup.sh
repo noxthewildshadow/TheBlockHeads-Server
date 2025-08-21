@@ -86,7 +86,6 @@ patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY" || ec
 
 echo "Library compatibility patches applied (some warnings may be normal)"
 
-# Resto del script permanece igual...
 echo "[5/7] Creating start script..."
 cat > start.sh << 'EOF'
 #!/bin/bash
@@ -188,7 +187,9 @@ add_player_if_new() {
         
         # Give first-time bonus
         give_first_time_bonus "$player_name"
+        return 0  # Jugador nuevo
     fi
+    return 1  # Jugador existente
 }
 
 # Give first-time bonus to new players
@@ -207,7 +208,7 @@ give_first_time_bonus() {
     
     echo "$current_data" > "$ECONOMY_FILE"
     echo "Gave first-time bonus to $player_name"
-    send_server_command "$player_name! You received 1 ticket as a welcome bonus. Type !economy_help for info."
+    # NOTA: El mensaje de bienvenida se envía ahora en show_welcome_message
 }
 
 # Grant login ticket (once per hour)
@@ -249,13 +250,19 @@ grant_login_ticket() {
 # Show welcome message with cooldown (3 minutes)
 show_welcome_message() {
     local player_name="$1"
+    local is_new_player="$2"
     local current_time=$(date +%s)
     local current_data=$(cat "$ECONOMY_FILE")
     local last_welcome_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_welcome_time')
     
     # Check if enough time has passed (3 minutes = 180 seconds)
     if [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
-        send_server_command "Welcome $player_name! Type !economy_help to see economy commands."
+        if [ "$is_new_player" = "true" ]; then
+            send_server_command "Welcome $player_name! You received 1 ticket as a welcome bonus. Type !economy_help for info."
+        else
+            send_server_command "Welcome $player_name! Type !economy_help to see economy commands."
+        fi
+        
         # Update last_welcome_time
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_welcome_time = $time')
         echo "$current_data" > "$ECONOMY_FILE"
@@ -430,7 +437,7 @@ monitor_log() {
     mkfifo "$admin_pipe"
     
     # Start reading from admin pipe in background
-    while read -r admin_command < "$admin_pipe"; do
+    while read -r admin_command < "$admin_pipe"; then
         echo "Processing admin command: $admin_command"
         if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]]; then
             process_admin_command "$admin_command"
@@ -451,16 +458,35 @@ monitor_log() {
         # Detect player connections (formato específico del log)
         if [[ "$line" =~ Player\ Connected\ ([a-zA-Z0-9_]+)\ \| ]]; then
             local player_name="${BASH_REMATCH[1]}"
+            
+            # Filtrar jugador "SERVER" y otros nombres del sistema
+            if [[ "$player_name" == "SERVER" ]]; then
+                echo "Ignoring system player: $player_name"
+                continue
+            fi
+            
             echo "Player connected: $player_name"
-            add_player_if_new "$player_name"
+            
+            # Añadir jugador si es nuevo y determinar si es nuevo
+            local is_new_player="false"
+            if add_player_if_new "$player_name"; then
+                is_new_player="true"
+            fi
+            
             grant_login_ticket "$player_name"
-            show_welcome_message "$player_name"
+            show_welcome_message "$player_name" "$is_new_player"
             continue
         fi
 
         # Detect player disconnections
         if [[ "$line" =~ Player\ Disconnected\ ([a-zA-Z0-9_]+) ]]; then
             local player_name="${BASH_REMATCH[1]}"
+            
+            # Filtrar jugador "SERVER"
+            if [[ "$player_name" == "SERVER" ]]; then
+                continue
+            fi
+            
             echo "Player disconnected: $player_name"
             continue
         fi
@@ -469,6 +495,13 @@ monitor_log() {
         if [[ "$line" =~ ([a-zA-Z0-9_]+):\ (.+)$ ]]; then
             local player_name="${BASH_REMATCH[1]}"
             local message="${BASH_REMATCH[2]}"
+            
+            # Filtrar mensajes del sistema
+            if [[ "$player_name" == "SERVER" ]]; then
+                echo "Ignoring system message: $message"
+                continue
+            fi
+            
             echo "Chat: $player_name: $message"
             add_player_if_new "$player_name"
             process_message "$player_name" "$message"
