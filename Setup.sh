@@ -362,13 +362,23 @@ monitor_log() {
     
     # Monitor log file for player activity
     tail -n 0 -F "$log_file" | filter_server_log | while read line; do
-        # Detect player connections
-        if [[ "$line" =~ ([a-zA-Z0-9_]+)\ connected\.$ ]]; then
+        # Detect player connections (formato específico del log)
+        if [[ "$line" =~ Player\ Connected\ ([a-zA-Z0-9_]+)\ \| ]]; then
             local player_name="${BASH_REMATCH[1]}"
             echo "Player connected: $player_name"
             add_player_if_new "$player_name"
             grant_login_ticket "$player_name"
             show_help_if_needed "$player_name"
+            
+            # Enviar mensaje de bienvenida inmediatamente
+            send_server_command "say Welcome $player_name! Type !economy_help to see economy commands."
+            continue
+        fi
+
+        # Detect player disconnections
+        if [[ "$line" =~ Player\ Disconnected\ ([a-zA-Z0-9_]+) ]]; then
+            local player_name="${BASH_REMATCH[1]}"
+            echo "Player disconnected: $player_name"
             continue
         fi
         
