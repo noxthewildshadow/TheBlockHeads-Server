@@ -1,426 +1,433 @@
 #!/usr/bin/env bash
 
-# Script de instalación para The Blockheads Server
-# Ejecutar con: curl -sSL https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server/main/Setup.sh | sudo bash
+# Blockheads Server Installer para Ubuntu Server 22.04
+# Autor: Script mejorado para instalación automática
 
-set -e  # Salir en caso de error
+set -e  # Salir si hay algún error
 
 # Colores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Directorio de instalación
+INSTALL_DIR="$HOME/blockheads_server"
+BINARY_NAME="blockheads_server171"
 
 # Función para imprimir mensajes
 print_status() {
-    echo -e "${GREEN}[+]${NC} $1"
+    echo -e "${BLUE}[INFO]${NC} $1"
 }
 
-print_error() {
-    echo -e "${RED}[-]${NC} $1"
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
 print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
+    echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
-# Verificar si estamos en Ubuntu 22.04
-check_ubuntu_version() {
-    if [[ ! -f /etc/os-release ]]; then
-        print_error "No se puede determinar la distribución de Linux"
-        exit 1
-    fi
-
-    source /etc/os-release
-    if [[ "$ID" != "ubuntu" || "$VERSION_ID" != "22.04" ]]; then
-        print_warning "Este script está optimizado para Ubuntu 22.04. Puede que no funcione correctamente en otras distribuciones."
-        if [[ -n "$FORCE_CONTINUE" ]]; then
-            print_status "Continuando por variable FORCE_CONTINUE..."
-        else
-            read -p "¿Continuar de todos modos? (y/N): " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                exit 1
-            fi
-        fi
-    fi
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Instalar dependencias necesarias
+# Función para verificar si un comando existe
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Función para instalar dependencias
 install_dependencies() {
-    print_status "Instalando dependencias del sistema..."
-    apt-get update > /dev/null 2>&1
-    apt-get install -y curl patchelf libgnustep-base1.28 libobjc4 libgnutls30 libgcrypt20 libffi8 libicu70 libdispatch0 > /dev/null 2>&1
+    print_status "Actualizando paquetes del sistema..."
+    sudo apt update > /dev/null 2>&1
+    
+    print_status "Instalando dependencias necesarias..."
+    
+    # Lista de paquetes necesarios
+    PACKAGES=(
+        "curl"
+        "tar"
+        "patchelf"
+        "libgnustep-base1.28"
+        "libobjc4"
+        "libgnutls30"
+        "libgcrypt20"
+        "libffi8"
+        "libicu70"
+        "libdispatch0"
+    )
+    
+    # Instalar paquetes
+    for package in "${PACKAGES[@]}"; do
+        if dpkg -l | grep -q "^ii  $package "; then
+            print_status "$package ya está instalado"
+        else
+            print_status "Instalando $package..."
+            sudo apt install -y "$package" > /dev/null 2>&1
+        fi
+    done
+    
+    print_success "Dependencias instaladas correctamente"
 }
 
-# Configurar el directorio de mundos
-setup_worlds_directory() {
-    print_status "Configurando directorio de mundos..."
-    
-    # Crear directorio si no existe
-    if [[ -n "$SUDO_USER" ]]; then
-        USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-    else
-        USER_HOME="$HOME"
-    fi
-    
-    # Crear ambos directorios para mayor compatibilidad
-    WORLD_DIR="$USER_HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/Saves"
-    mkdir -p "$WORLD_DIR"
-    
-    # Cambiar propietario si se ejecutó con sudo
-    if [[ -n "$SUDO_USER" ]]; then
-        chown -R "$SUDO_USER:$SUDO_USER" "$USER_HOME/GNUstep"
-    fi
-}
-
-# Descargar y configurar el servidor
+# Función para descargar y configurar el servidor
 setup_server() {
-    print_status "Creando directorio para el servidor..."
-    mkdir -p /opt/blockheads-server
-    cd /opt/blockheads-server
-
-    print_status "Descargando el servidor de The Blockheads..."
-    curl -sL https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz | tar xz -C ./ > /dev/null 2>&1
-
-    # Verificar que el binario se descargó correctamente
-    if [[ ! -f "blockheads_server171" ]]; then
-        print_error "Error: El binario blockheads_server171 no se descargó correctamente"
-        exit 1
-    fi
-
-    print_status "Aplicando parches al binario..."
-    # Aplicar parches de forma no fatal
-    patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 blockheads_server171 > /dev/null 2>&1 || true
-    patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 blockheads_server171 > /dev/null 2>&1 || true
-    patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 blockheads_server171 > /dev/null 2>&1 || true
-    patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 blockheads_server171 > /dev/null 2>&1 || true
-    patchelf --replace-needed libffi.so.6 libffi.so.8 blockheads_server171 > /dev/null 2>&1 || true
-    patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 blockheads_server171 > /dev/null 2>&1 || true
-    patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 blockheads_server171 > /dev/null 2>&1 || true
-    patchelf --replace-needed libicudata.so.48 libicudata.so.70 blockheads_server171 > /dev/null 2>&1 || true
-    patchelf --replace-needed libdispatch.so libdispatch.so.0 blockheads_server171 > /dev/null 2>&1 || true
-
-    # Hacer el binario ejecutable
-    chmod +x blockheads_server171
+    print_status "Creando directorio de instalación..."
+    mkdir -p "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
     
-    # Verificar que el binario existe y es ejecutable
-    if [[ ! -f "blockheads_server171" ]]; then
-        print_error "Error: El binario blockheads_server171 no existe"
-        exit 1
-    fi
+    print_status "Descargando Blockheads Server..."
+    curl -sL https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz | tar xvz > /dev/null 2>&1
     
-    if [[ ! -x "blockheads_server171" ]]; then
-        print_error "Error: El binario blockheads_server171 no es ejecutable"
-        exit 1
-    fi
+    print_status "Aplicando parches de compatibilidad..."
+    patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 $BINARY_NAME > /dev/null 2>&1
+    patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 $BINARY_NAME > /dev/null 2>&1
+    patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 $BINARY_NAME > /dev/null 2>&1
+    patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 $BINARY_NAME > /dev/null 2>&1
+    patchelf --replace-needed libffi.so.6 libffi.so.8 $BINARY_NAME > /dev/null 2>&1
+    patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 $BINARY_NAME > /dev/null 2>&1
+    patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 $BINARY_NAME > /dev/null 2>&1
+    patchelf --replace-needed libicudata.so.48 libicudata.so.70 $BINARY_NAME > /dev/null 2>&1
+    patchelf --replace-needed libdispatch.so libdispatch.so.0 $BINARY_NAME > /dev/null 2>&1
     
-    # Configurar directorio de mundos
-    setup_worlds_directory
+    # Hacer ejecutable el binario
+    chmod +x $BINARY_NAME
+    
+    print_success "Servidor configurado correctamente"
 }
 
-# Crear script de gestión de mundos
-create_management_script() {
-    print_status "Creando script de gestión de mundos..."
+# Función para crear el script de inicio
+create_start_script() {
+    print_status "Creando script de inicio..."
     
-    # Crear el script de gestión
-    cat > /usr/local/bin/blockheads << 'EOF'
+    cat > "$INSTALL_DIR/start_world.sh" << 'EOF'
 #!/usr/bin/env bash
 
-# Configuración
-SERVER_DIR="/opt/blockheads-server"
-SERVER_BIN="$SERVER_DIR/blockheads_server171"
+# Script para iniciar mundos de Blockheads Server
+# Uso: ./start_world.sh WORLD_ID PORT [MAX_PLAYERS] [SAVE_DELAY]
 
-# Función para mostrar ayuda
-show_help() {
-    echo "Uso: blockheads [COMANDO] [OPCIONES]"
+set -e
+
+# Colores
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_status() { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+print_usage() {
+    echo "Uso: $0 WORLD_ID PORT [MAX_PLAYERS] [SAVE_DELAY]"
     echo ""
-    echo "Comandos:"
-    echo "  create <NOMBRE_MUNDO> [OPCIONES]  Crear un nuevo mundo"
-    echo "  start <ID_MUNDO> [PUERTO]         Iniciar un mundo existente"
-    echo "  list                              Listar todos los mundos"
-    echo "  delete <ID_MUNDO>                 Eliminar un mundo"
-    echo "  help                              Mostrar esta ayuda"
+    echo "Argumentos:"
+    echo "  WORLD_ID      - ID del mundo a cargar"
+    echo "  PORT          - Puerto del servidor (ej: 15151)"
+    echo "  MAX_PLAYERS   - Máximo de jugadores (opcional, default: 16)"
+    echo "  SAVE_DELAY    - Retraso de guardado en segundos (opcional, default: 1)"
     echo ""
-    echo "Opciones para crear:"
-    echo "  -p, --port PORT                   Puerto del servidor (por defecto: 15151)"
-    echo "  -m, --max-players MAX             Máximo de jugadores (por defecto: 16, máximo: 32)"
-    echo "  -w, --world-width TAMAÑO          Tamaño del mundo (1/16, 1/4, 1, 4, 16)"
-    echo "  -e, --expert-mode                 Habilitar modo experto"
+    echo "Ejemplos:"
+    echo "  $0 mi_mundo 15151"
+    echo "  $0 mi_mundo 15151 20"
+    echo "  $0 mi_mundo 15151 20 5"
 }
 
-# Función para obtener información de mundos
-get_world_info() {
-    cd "$SERVER_DIR"
-    "$SERVER_BIN" --list
-}
+# Verificar argumentos mínimos
+if [ $# -lt 2 ]; then
+    print_error "Argumentos insuficientes"
+    print_usage
+    exit 1
+fi
 
-# Función para parsear la salida de --list y obtener ID y nombre
-parse_world_list() {
-    local world_info=$(get_world_info)
-    echo "$world_info" | while IFS= read -r line; do
-        if [[ -n "$line" ]]; then
-            # El formato es: "NOMBRE" stored in directory named ID
-            if [[ "$line" =~ \""(.*)\""\ stored\ in\ directory\ named\ ([0-9a-f]+)$ ]]; then
-                local name="${BASH_REMATCH[1]}"
-                local id="${BASH_REMATCH[2]}"
-                echo "$id $name"
-            fi
-        fi
-    done
-}
+WORLD_ID="$1"
+PORT="$2"
+MAX_PLAYERS="${3:-16}"
+SAVE_DELAY="${4:-1}"
+BINARY="./blockheads_server171"
 
-# Función para obtener el ID de un mundo por nombre
-get_world_id_by_name() {
-    local world_name="$1"
-    parse_world_list | while read -r id name; do
-        if [[ "$name" == "$world_name" ]]; then
-            echo "$id"
-            return 0
-        fi
-    done
-}
+# Verificar que el binario existe
+if [ ! -f "$BINARY" ]; then
+    print_error "No se encontró el binario del servidor: $BINARY"
+    print_error "Asegúrate de ejecutar este script desde el directorio de instalación"
+    exit 1
+fi
 
-# Función para obtener el nombre de un mundo por ID
-get_world_name_by_id() {
-    local world_id="$1"
-    parse_world_list | while read -r id name; do
-        if [[ "$id" == "$world_id" ]]; then
-            echo "$name"
-            return 0
-        fi
-    done
-}
-
-# Función para verificar si un mundo existe por ID
-world_exists_by_id() {
-    local world_id="$1"
-    parse_world_list | while read -r id name; do
-        if [[ "$id" == "$world_id" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Función para verificar si un mundo existe por nombre
-world_exists_by_name() {
-    local world_name="$1"
-    parse_world_list | while read -r id name; do
-        if [[ "$name" == "$world_name" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Función para resolver un identificador (ID o nombre) a ID
-resolve_world_identifier() {
-    local identifier="$1"
-    
-    # Si es un ID válido (32 caracteres hexadecimales)
-    if [[ "$identifier" =~ ^[0-9a-f]{32}$ ]]; then
-        if world_exists_by_id "$identifier"; then
-            echo "$identifier"
-            return 0
-        fi
-    fi
-    
-    # Si es un nombre, buscar el ID
-    local world_id=$(get_world_id_by_name "$identifier")
-    if [[ -n "$world_id" ]]; then
-        echo "$world_id"
-        return 0
-    fi
-    
-    return 1
-}
-
-# Función para crear un mundo
-create_world() {
-    local world_name="$1"
-    shift
-    local extra_args=""
-    
-    # Parsear argumentos adicionales
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -p|--port)
-                extra_args="$extra_args --port $2"
-                shift 2
-                ;;
-            -m|--max-players)
-                extra_args="$extra_args --max_players $2"
-                shift 2
-                ;;
-            -w|--world-width)
-                extra_args="$extra_args --world_width $2"
-                shift 2
-                ;;
-            -e|--expert-mode)
-                extra_args="$extra_args --expert-mode"
-                shift
-                ;;
-            *)
-                echo "Opción desconocida: $1"
-                exit 1
-                ;;
-        esac
-    done
-    
-    # Crear el mundo
-    cd "$SERVER_DIR"
-    "$SERVER_BIN" --new "$world_name" $extra_args
-    
-    # Obtener el ID del mundo recién creado
-    local world_id=$(get_world_id_by_name "$world_name")
-    
-    if [[ -n "$world_id" ]]; then
-        echo "Mundo creado con éxito. ID: $world_id"
-        echo "Para iniciarlo: blockheads start $world_id"
-    else
-        echo "Error: No se pudo determinar el ID del mundo creado."
-        echo "Intenta listar los mundos con: blockheads list"
-    fi
-}
-
-# Función para iniciar un mundo
-start_world() {
-    local world_identifier="$1"
-    local port="${2:-15151}"
-    local world_id
-    
-    # Resolver el identificador (puede ser ID o nombre)
-    world_id=$(resolve_world_identifier "$world_identifier")
-    if [[ $? -ne 0 ]] || [[ -z "$world_id" ]]; then
-        echo "Error: No existe un mundo con identificador '$world_identifier'"
-        echo "Lista de mundos disponibles:"
-        list_worlds
-        exit 1
-    fi
-    
-    echo "Iniciando mundo ID: $world_id en puerto: $port"
-    cd "$SERVER_DIR"
-    "$SERVER_BIN" --load "$world_id" --port "$port" --no-exit
-}
-
-# Función para listar mundos
-list_worlds() {
-    cd "$SERVER_DIR"
+# Verificar que el mundo existe
+print_status "Verificando que el mundo '$WORLD_ID' existe..."
+if ! $BINARY --list | grep -q "$WORLD_ID"; then
+    print_error "El mundo '$WORLD_ID' no existe"
+    echo ""
     echo "Mundos disponibles:"
-    "$SERVER_BIN" --list
+    $BINARY --list
+    echo ""
+    echo "Para crear un nuevo mundo, usa:"
+    echo "  $BINARY --new NOMBRE_MUNDO --world_id $WORLD_ID --port $PORT"
+    exit 1
+fi
+
+# Verificar que el puerto no esté en uso
+if netstat -tuln | grep -q ":$PORT "; then
+    print_error "El puerto $PORT ya está en uso"
+    echo "Puertos en uso:"
+    netstat -tuln | grep ":$PORT"
+    exit 1
+fi
+
+print_success "Iniciando mundo '$WORLD_ID' en puerto $PORT..."
+print_status "Configuración:"
+print_status "  - Mundo: $WORLD_ID"
+print_status "  - Puerto: $PORT"
+print_status "  - Máximo jugadores: $MAX_PLAYERS"
+print_status "  - Retraso guardado: ${SAVE_DELAY}s"
+echo ""
+print_status "Presiona Ctrl+C para detener el servidor"
+echo ""
+
+# Iniciar el servidor
+exec $BINARY --load "$WORLD_ID" --port "$PORT" --max_players "$MAX_PLAYERS" --save_delay "$SAVE_DELAY"
+EOF
+
+    chmod +x "$INSTALL_DIR/start_world.sh"
+    print_success "Script de inicio creado: $INSTALL_DIR/start_world.sh"
 }
 
-# Función para eliminar un mundo
-delete_world() {
-    local world_identifier="$1"
-    local world_id
-    local reply
+# Función para crear script de gestión de mundos
+create_world_manager() {
+    print_status "Creando script de gestión de mundos..."
     
-    # Resolver el identificador (puede ser ID o nombre)
-    world_id=$(resolve_world_identifier "$world_identifier")
-    if [[ $? -ne 0 ]] || [[ -z "$world_id" ]]; then
-        echo "Error: No existe un mundo con identificador '$world_identifier'"
-        echo "Lista de mundos disponibles:"
-        list_worlds
-        exit 1
-    fi
-    
-    # Obtener el nombre del mundo para mostrar
-    local world_name=$(get_world_name_by_id "$world_id")
-    
-    read -r -p "¿Estás seguro de que quieres eliminar el mundo '$world_name' (ID: $world_id)? (y/N): " reply
-    echo
-    if [[ ! $reply =~ ^[Yy]$ ]]; then
-        exit 0
-    fi
-    
-    echo "Eliminando mundo '$world_name' (ID: $world_id)"
-    cd "$SERVER_DIR"
-    "$SERVER_BIN" --delete "$world_id" --force
+    cat > "$INSTALL_DIR/world_manager.sh" << 'EOF'
+#!/usr/bin/env bash
+
+# Script para gestionar mundos de Blockheads Server
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_status() { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+BINARY="./blockheads_server171"
+
+show_help() {
+    echo "Gestor de Mundos de Blockheads Server"
+    echo ""
+    echo "Uso: $0 [COMANDO] [ARGUMENTOS]"
+    echo ""
+    echo "Comandos disponibles:"
+    echo "  list                           - Listar todos los mundos"
+    echo "  create NOMBRE [WORLD_ID] [OPTIONS] - Crear nuevo mundo"
+    echo "  delete WORLD_ID                - Eliminar mundo"
+    echo "  rename WORLD_ID NUEVO_NOMBRE   - Renombrar mundo"
+    echo "  info WORLD_ID                  - Información del mundo"
+    echo ""
+    echo "Opciones para crear mundo:"
+    echo "  --port PORT          - Puerto (default: 15151)"
+    echo "  --max_players NUM    - Máximo jugadores (default: 16)"
+    echo "  --world_width SIZE   - Tamaño mundo (1/16, 1/4, 1, 4, 16)"
+    echo "  --expert-mode        - Modo experto"
+    echo "  --owner OWNER        - Propietario del mundo"
+    echo ""
+    echo "Ejemplos:"
+    echo "  $0 list"
+    echo "  $0 create \"Mi Mundo\" mi_mundo_01 --port 15151"
+    echo "  $0 delete mi_mundo_01"
 }
 
-# Main command processing
 case "$1" in
-    create)
-        if [[ -z "$2" ]]; then
-            echo "Error: Se requiere un nombre para el mundo"
+    "list"|"l")
+        print_status "Mundos disponibles:"
+        $BINARY --list
+        ;;
+    "create"|"c")
+        if [ -z "$2" ]; then
+            print_error "Nombre del mundo requerido"
+            show_help
             exit 1
         fi
-        create_world "${@:2}"
+        
+        WORLD_NAME="$2"
+        WORLD_ID="$3"
+        shift 3
+        
+        CMD="$BINARY --new \"$WORLD_NAME\""
+        
+        if [ ! -z "$WORLD_ID" ]; then
+            CMD="$CMD --world_id \"$WORLD_ID\""
+        fi
+        
+        # Procesar opciones adicionales
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                "--port")
+                    CMD="$CMD --port $2"
+                    shift 2
+                    ;;
+                "--max_players")
+                    CMD="$CMD --max_players $2"
+                    shift 2
+                    ;;
+                "--world_width")
+                    CMD="$CMD --world_width $2"
+                    shift 2
+                    ;;
+                "--expert-mode")
+                    CMD="$CMD --expert-mode"
+                    shift
+                    ;;
+                "--owner")
+                    CMD="$CMD --owner \"$2\""
+                    shift 2
+                    ;;
+                *)
+                    print_error "Opción desconocida: $1"
+                    exit 1
+                    ;;
+            esac
+        done
+        
+        print_status "Creando mundo '$WORLD_NAME'..."
+        eval $CMD
+        print_success "Mundo creado exitosamente"
         ;;
-    start)
-        if [[ -z "$2" ]]; then
-            echo "Error: Se requiere el ID o nombre de un mundo"
+    "delete"|"d")
+        if [ -z "$2" ]; then
+            print_error "ID del mundo requerido"
             exit 1
         fi
-        start_world "$2" "$3"
+        
+        print_status "Eliminando mundo '$2'..."
+        $BINARY --delete "$2" --force
+        print_success "Mundo eliminado"
         ;;
-    list)
-        list_worlds
-        ;;
-    delete)
-        if [[ -z "$2" ]]; then
-            echo "Error: Se requiere el ID o nombre de un mundo"
+    "rename"|"r")
+        if [ -z "$2" ] || [ -z "$3" ]; then
+            print_error "ID del mundo y nuevo nombre requeridos"
             exit 1
         fi
-        delete_world "$2"
+        
+        print_status "Renombrando mundo '$2' a '$3'..."
+        $BINARY --rename-from "$2" --rename-to "$3"
+        print_success "Mundo renombrado"
         ;;
-    help|*)
+    "info"|"i")
+        if [ -z "$2" ]; then
+            print_error "ID del mundo requerido"
+            exit 1
+        fi
+        
+        print_status "Información del mundo '$2':"
+        $BINARY --list | grep "$2" || print_error "Mundo no encontrado"
+        ;;
+    "help"|"h"|"")
         show_help
+        ;;
+    *)
+        print_error "Comando desconocido: $1"
+        show_help
+        exit 1
         ;;
 esac
 EOF
 
-    chmod +x /usr/local/bin/blockheads
+    chmod +x "$INSTALL_DIR/world_manager.sh"
+    print_success "Script de gestión creado: $INSTALL_DIR/world_manager.sh"
 }
 
-# Crear script de desinstalación
-create_uninstall_script() {
-    print_status "Creando script de desinstalación..."
-    cat > /usr/local/bin/blockheads-uninstall << 'EOF'
+# Función para crear script de ejemplo
+create_example_setup() {
+    print_status "Creando script de ejemplo..."
+    
+    cat > "$INSTALL_DIR/example_setup.sh" << 'EOF'
 #!/usr/bin/env bash
 
-echo "Desinstalando The Blockheads Server..."
-rm -rf /opt/blockheads-server
-rm -f /usr/local/bin/blockheads
-rm -f /usr/local/bin/blockheads-uninstall
-echo "Servidor desinstalado correctamente."
+# Script de ejemplo para configurar un mundo de prueba
+
+set -e
+
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_status() { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+
+print_status "Creando mundo de ejemplo..."
+
+# Crear mundo de ejemplo
+./world_manager.sh create "Mundo de Ejemplo" ejemplo_01 --port 15151 --max_players 20
+
+print_success "Mundo de ejemplo creado!"
+echo ""
+echo "Para iniciar el servidor:"
+echo "  ./start_world.sh ejemplo_01 15151"
+echo ""
+echo "Para gestionar mundos:"
+echo "  ./world_manager.sh list"
 EOF
 
-    chmod +x /usr/local/bin/blockheads-uninstall
+    chmod +x "$INSTALL_DIR/example_setup.sh"
+    print_success "Script de ejemplo creado: $INSTALL_DIR/example_setup.sh"
 }
 
 # Función principal
 main() {
-    print_status "Iniciando instalación de The Blockheads Server..."
+    echo "=================================="
+    echo "  Blockheads Server Installer"
+    echo "  Ubuntu Server 22.04"
+    echo "=================================="
+    echo ""
     
-    # Verificar si se está ejecutando como root
-    if [[ $EUID -ne 0 ]]; then
-        print_error "Este script debe ejecutarse con privilegios de root. Use sudo."
+    # Verificar sistema
+    if [ ! -f /etc/os-release ] || ! grep -q "22.04" /etc/os-release; then
+        print_warning "Este script está optimizado para Ubuntu Server 22.04"
+        print_warning "Continuando de todos modos..."
+    fi
+    
+    # Verificar permisos sudo
+    if ! sudo -n true 2>/dev/null; then
+        print_error "Este script requiere permisos sudo"
+        print_error "Ejecuta: sudo -v"
         exit 1
     fi
     
-    check_ubuntu_version
+    # Proceso de instalación
     install_dependencies
     setup_server
-    create_management_script
-    create_uninstall_script
+    create_start_script
+    create_world_manager
+    create_example_setup
     
-    print_status "Instalación completada!"
     echo ""
-    echo "Para crear un nuevo mundo:"
-    echo "  blockheads create NOMBRE_MUNDO [OPCIONES]"
+    echo "=================================="
+    print_success "INSTALACIÓN COMPLETADA"
+    echo "=================================="
     echo ""
-    echo "Para iniciar un mundo existente:"
-    echo "  blockheads start ID_MUNDO [PUERTO]"
-    echo "  blockheads start NOMBRE_MUNDO [PUERTO]"
+    print_status "Directorio de instalación: $INSTALL_DIR"
+    print_status "Scripts disponibles:"
+    echo "  - start_world.sh      : Iniciar mundos existentes"
+    echo "  - world_manager.sh    : Gestionar mundos"
+    echo "  - example_setup.sh    : Crear mundo de ejemplo"
     echo ""
-    echo "Para listar todos los mundos:"
-    echo "  blockheads list"
+    print_status "Próximos pasos:"
+    echo "1. cd $INSTALL_DIR"
+    echo "2. ./example_setup.sh                    # Crear mundo de ejemplo"
+    echo "3. ./start_world.sh ejemplo_01 15151     # Iniciar servidor"
     echo ""
-    echo "El servidor se ha instalado en: /opt/blockheads-server"
+    print_status "O crear tu propio mundo:"
+    echo "1. ./world_manager.sh create \"Mi Mundo\" mi_mundo --port 15151"
+    echo "2. ./start_world.sh mi_mundo 15151"
+    echo ""
+    print_success "¡Disfruta tu servidor de Blockheads!"
 }
 
-# Ejecutar función principal
+# Ejecutar instalación
 main "$@"
