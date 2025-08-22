@@ -4,7 +4,7 @@ set -euo pipefail
 # =====================================================
 # Setup.sh - Complete installer for The Blockheads server
 # Designed to run with:
-#   curl -sSL <this_url> | sudo bash
+#   curl -sSL https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server/refs/heads/main/Setup.sh | sudo bash
 # =====================================================
 
 # Check running as root
@@ -276,13 +276,13 @@ case "${1:-help}" in
 esac
 EOF
 
-# BOT SERVER (English)
+# BOT SERVER (patched and more robust)
 cat > bot_server.sh <<'EOF'
 #!/bin/bash
 set -euo pipefail
 
-# bot_server.sh
-# Usage: ./bot_server.sh /path/to/console.log
+# bot_server.sh (versión parcheada y más robusta)
+# Uso: ./bot_server.sh /ruta/a/console.log
 
 ECONOMY_FILE="economy_data.json"
 LOG_FILE="${1:-}"
@@ -292,12 +292,20 @@ if [ -z "$LOG_FILE" ]; then
     exit 1
 fi
 
+# Send to server as a chat message (use 'say' so server outputs to chat)
 send_server_command() {
     local message="$1"
-    # Send command directly (no "say" prefix)
-    screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null || {
-        echo "[bot] Failed to send command to server. Is the server screen session running?"
+    local cmd
+    # Use 'say' to broadcast. If you prefer private messages, change to "tell <player> <msg>"
+    cmd="say $message"
+    screen -S blockheads_server -X stuff "$cmd$(printf \\r)" 2>/dev/null || {
+        echo "[bot] Failed to send command to server (screen session may be missing)."
     }
+}
+
+# Helper: lowercase canonical player key for persistent storage
+player_key() {
+    echo "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 initialize_economy() {
@@ -314,18 +322,20 @@ is_player_in_list() {
     world_dir=$(dirname "$LOG_FILE")
     local list_file="$world_dir/${list_type}list.txt"
     local lower_name
-    lower_name=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
+    lower_name=$(player_key "$player_name")
     [ -f "$list_file" ] && grep -q "^$lower_name$" "$list_file"
 }
 
 add_player_if_new() {
     local player_name="$1"
+    local pkey
+    pkey=$(player_key "$player_name")
     local current_data
     current_data=$(cat "$ECONOMY_FILE")
     local exists
-    exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
+    exists=$(echo "$current_data" | jq --arg player "$pkey" '.players | has($player)')
     if [ "$exists" = "false" ]; then
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')
+        current_data=$(echo "$current_data" | jq --arg player "$pkey" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')
         echo "$current_data" > "$ECONOMY_FILE"
         give_first_time_bonus "$player_name"
         return 0
@@ -335,32 +345,39 @@ add_player_if_new() {
 
 give_first_time_bonus() {
     local player_name="$1"
+    local pkey
+    pkey=$(player_key "$player_name")
     local current_data
     current_data=$(cat "$ECONOMY_FILE")
     local now
     now=$(date +%s)
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets = 1')
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$now" '.players[$player].last_login = $time')
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
+    current_data=$(echo "$current_data" | jq --arg player "$pkey" '.players[$player].tickets = 1')
+    current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson time "$now" '.players[$player].last_login = $time')
+    current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
     echo "$current_data" > "$ECONOMY_FILE"
+    send_server_command "Welcome $player_name! You received 1 welcome ticket."
     echo "[bot] Welcome bonus given to $player_name"
 }
 
 grant_login_ticket() {
     local player_name="$1"
+    local pkey
+    pkey=$(player_key "$player_name")
     local now
     now=$(date +%s)
     local current_data
     current_data=$(cat "$ECONOMY_FILE")
     local last_login
-    last_login=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_login')
+    last_login=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].last_login')
+    if [ "$last_login" = "null" ]; then last_login=0; fi
     if [ "$last_login" -eq 0 ] || [ $((now - last_login)) -ge 3600 ]; then
         local current_tickets
-        current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
+        current_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
+        current_tickets=${current_tickets:-0}
         local new_tickets=$((current_tickets + 1))
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$now" '.players[$player].last_login = $time')
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time}]')
+        current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+        current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson time "$now" '.players[$player].last_login = $time')
+        current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time}]')
         echo "$current_data" > "$ECONOMY_FILE"
         send_server_command "$player_name, you received 1 login ticket! You now have $new_tickets tickets."
     fi
@@ -369,29 +386,36 @@ grant_login_ticket() {
 has_purchased() {
     local player_name="$1"
     local item="$2"
+    local pkey
+    pkey=$(player_key "$player_name")
     local current_data
     current_data=$(cat "$ECONOMY_FILE")
     local res
-    res=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases | index($item) != null')
+    res=$(echo "$current_data" | jq --arg player "$pkey" --arg item "$item" '.players[$player].purchases | index($item) != null')
     [ "$res" = "true" ]
 }
 
 add_purchase() {
     local player_name="$1"
     local item="$2"
+    local pkey
+    pkey=$(player_key "$player_name")
     local current_data
     current_data=$(cat "$ECONOMY_FILE")
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases += [$item]')
+    current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg item "$item" '.players[$player].purchases += [$item]')
     echo "$current_data" > "$ECONOMY_FILE"
 }
 
 process_message() {
     local player_name="$1"
     local message="$2"
+    local pkey
+    pkey=$(player_key "$player_name")
     local current_data
     current_data=$(cat "$ECONOMY_FILE")
     local player_tickets
-    player_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
+    player_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
+    player_tickets=${player_tickets:-0}
 
     case "$message" in
         hi|hello|hola|Hola|Hi|Hello)
@@ -405,11 +429,12 @@ process_message() {
                 send_server_command "$player_name, you already have MOD rank. No need to purchase again."
             elif [ "$player_tickets" -ge 10 ]; then
                 local new_tickets=$((player_tickets - 10))
-                current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+                current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
                 add_purchase "$player_name" "mod"
-                current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
+                current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
                 echo "$current_data" > "$ECONOMY_FILE"
-                screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
+                # Use slash command to change rank (server admin command)
+                screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)" 2>/dev/null || true
                 send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
                 send_server_command "$player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
@@ -420,11 +445,11 @@ process_message() {
                 send_server_command "$player_name, you already have ADMIN rank. No need to purchase again."
             elif [ "$player_tickets" -ge 20 ]; then
                 local new_tickets=$((player_tickets - 20))
-                current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+                current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
                 add_purchase "$player_name" "admin"
-                current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
+                current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
                 echo "$current_data" > "$ECONOMY_FILE"
-                screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
+                screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)" 2>/dev/null || true
                 send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
             else
                 send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
@@ -441,30 +466,33 @@ process_admin_command() {
     local current_data
     current_data=$(cat "$ECONOMY_FILE")
 
-    if [[ "$command" =~ ^!send_ticket\ ([a-zA-Z0-9_]+)\ ([0-9]+)$ ]]; then
+    if [[ "$command" =~ ^!send_ticket[[:space:]]+([a-zA-Z0-9_]+)[[:space:]]+([0-9]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         local tickets_to_add="${BASH_REMATCH[2]}"
+        local pkey
+        pkey=$(player_key "$player_name")
         local player_exists
-        player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
+        player_exists=$(echo "$current_data" | jq --arg player "$pkey" '.players | has($player)')
         if [ "$player_exists" = "false" ]; then
             echo "Player $player_name not found in economy system."
             return
         fi
         local current_tickets
-        current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
+        current_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
+        current_tickets=${current_tickets:-0}
         local new_tickets=$((current_tickets + tickets_to_add))
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" --argjson amount "$tickets_to_add" '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $time}]')
+        current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
+        current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" --argjson amount "$tickets_to_add" '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $time}]')
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
         send_server_command "$player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
-    elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
+    elif [[ "$command" =~ ^!make_mod[[:space:]]+([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
-        screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
+        screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)" 2>/dev/null || true
         send_server_command "$player_name has been promoted to MOD by admin!"
-    elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
+    elif [[ "$command" =~ ^!make_admin[[:space:]]+([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
-        screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
+        screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)" 2>/dev/null || true
         send_server_command "$player_name has been promoted to ADMIN by admin!"
     else
         echo "Unknown admin command: $command"
@@ -473,8 +501,8 @@ process_admin_command() {
 
 filter_server_log() {
     while read -r line; do
-        # drop noisy restart/starting lines and server internal "say" lines
-        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]] || [[ "$line" == *"SERVER: say"* ]]; then
+        # drop noisy restart/starting lines (keep possible player chat)
+        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
             continue
         fi
         echo "$line"
@@ -491,18 +519,22 @@ monitor_log() {
     rm -f "$admin_pipe"
     mkfifo "$admin_pipe"
 
+    # read admin stdin into admin_pipe
     ( while read -r admin_command; do
           echo "$admin_command" > "$admin_pipe"
       done ) &
 
+    # process admin commands from pipe
     ( while read -r admin_command < "$admin_pipe"; do
           process_admin_command "$admin_command"
       done ) &
 
     declare -A welcome_shown
 
+    # Tail the log and process each line after filtering
     tail -n 0 -F "$LOG_FILE" | filter_server_log | while read -r line; do
-        if [[ "$line" =~ Player\ Connected\ ([a-zA-Z0-9_]+)\ \| ]]; then
+        # Flexible "Player Connected" detection (accepts multiple timestamp/prefix formats)
+        if [[ "$line" =~ Player.*Connected.*([a-zA-Z0-9_]+) ]]; then
             local player_name="${BASH_REMATCH[1]}"
             [ "$player_name" = "SERVER" ] && continue
             echo "[bot] Player connected: $player_name"
@@ -523,13 +555,15 @@ monitor_log() {
             continue
         fi
 
-        if [[ "$line" =~ Player\ Disconnected\ ([a-zA-Z0-9_]+) ]]; then
+        # Flexible disconnect detection
+        if [[ "$line" =~ Player.*Disconnected.*([a-zA-Z0-9_]+) ]]; then
             local player_name="${BASH_REMATCH[1]}"
             unset welcome_shown["$player_name"]
             continue
         fi
 
-        if [[ "$line" =~ ^([a-zA-Z0-9_]+):\ (.+)$ ]]; then
+        # Flexible chat detection: find "<PlayerName>: <message>" anywhere in the line
+        if [[ "$line" =~ ([a-zA-Z0-9_]+):[[:space:]](.+) ]]; then
             local player_name="${BASH_REMATCH[1]}"
             local message="${BASH_REMATCH[2]}"
             [ "$player_name" = "SERVER" ] && continue
