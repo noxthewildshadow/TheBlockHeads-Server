@@ -45,8 +45,8 @@ check_ubuntu_version() {
 # Instalar dependencias necesarias
 install_dependencies() {
     print_status "Instalando dependencias del sistema..."
-    apt update
-    apt install -y curl patchelf libgnustep-base1.28 libobjc4 libgnutls30 libgcrypt20 libffi8 libicu70 libdispatch0
+    apt-get update > /dev/null 2>&1
+    apt-get install -y curl patchelf libgnustep-base1.28 libobjc4 libgnutls30 libgcrypt20 libffi8 libicu70 libdispatch0 > /dev/null 2>&1
 }
 
 # Descargar y configurar el servidor
@@ -56,18 +56,18 @@ setup_server() {
     cd /opt/blockheads-server
 
     print_status "Descargando el servidor de The Blockheads..."
-    curl -sL https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz | tar xz -C ./
+    curl -sL https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz | tar xz -C ./ > /dev/null 2>&1
 
     print_status "Aplicando parches al binario..."
-    patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 blockheads_server171
-    patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 blockheads_server171
-    patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 blockheads_server171
-    patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 blockheads_server171
-    patchelf --replace-needed libffi.so.6 libffi.so.8 blockheads_server171
-    patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 blockheads_server171
-    patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 blockheads_server171
-    patchelf --replace-needed libicudata.so.48 libicudata.so.70 blockheads_server171
-    patchelf --replace-needed libdispatch.so libdispatch.so.0 blockheads_server171
+    patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 blockheads_server171 > /dev/null 2>&1
+    patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 blockheads_server171 > /dev/null 2>&1
+    patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 blockheads_server171 > /dev/null 2>&1
+    patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 blockheads_server171 > /dev/null 2>&1
+    patchelf --replace-needed libffi.so.6 libffi.so.8 blockheads_server171 > /dev/null 2>&1
+    patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 blockheads_server171 > /dev/null 2>&1
+    patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 blockheads_server171 > /dev/null 2>&1
+    patchelf --replace-needed libicudata.so.48 libicudata.so.70 blockheads_server171 > /dev/null 2>&1
+    patchelf --replace-needed libdispatch.so libdispatch.so.0 blockheads_server171 > /dev/null 2>&1
 
     # Hacer el binario ejecutable
     chmod +x blockheads_server171
@@ -101,6 +101,25 @@ show_help() {
     echo "  -w, --world-width TAMAÑO          Tamaño del mundo (1/16, 1/4, 1, 4, 16)"
     echo "  -e, --expert-mode                 Habilitar modo experto"
     echo "  -o, --owner PROPIETARIO           Establecer propietario del mundo"
+}
+
+# Función para obtener el ID de un mundo por nombre
+get_world_id_by_name() {
+    local world_name="$1"
+    cd "$SERVER_DIR"
+    "$SERVER_BIN" --list | awk -v name="$world_name" '$2 == name {print $1; exit}'
+}
+
+# Función para verificar si un mundo existe
+world_exists() {
+    local world_id="$1"
+    cd "$SERVER_DIR"
+    local exists=$("$SERVER_BIN" --list | awk -v id="$world_id" '$1 == id {print $1}')
+    if [[ -n "$exists" ]]; then
+        return 0  # Existe
+    else
+        return 1  # No existe
+    fi
 }
 
 # Función para crear un mundo
@@ -144,7 +163,7 @@ create_world() {
     "$SERVER_BIN" --new "$world_name" $extra_args
     
     # Obtener el ID del mundo recién creado
-    local world_id=$("$SERVER_BIN" --list | grep "$world_name" | awk '{print $1}')
+    local world_id=$(get_world_id_by_name "$world_name")
     
     if [[ -n "$world_id" ]]; then
         echo "Mundo creado con éxito. ID: $world_id"
@@ -156,17 +175,30 @@ create_world() {
 
 # Función para iniciar un mundo
 start_world() {
-    local world_id="$1"
+    local world_identifier="$1"
     local port="${2:-15151}"
     
+    # Determinar si es un ID o nombre
+    if [[ "$world_identifier" =~ ^[0-9]+$ ]]; then
+        # Es un ID numérico
+        local world_id="$world_identifier"
+    else
+        # Es un nombre, obtener el ID
+        local world_id=$(get_world_id_by_name "$world_identifier")
+        if [[ -z "$world_id" ]]; then
+            echo "Error: No existe un mundo con nombre '$world_identifier'"
+            exit 1
+        fi
+    fi
+    
     # Verificar que el mundo existe
-    cd "$SERVER_DIR"
-    if ! "$SERVER_BIN" --list | grep -q "^$world_id"; then
+    if ! world_exists "$world_id"; then
         echo "Error: No existe un mundo con ID $world_id"
         exit 1
     fi
     
     echo "Iniciando mundo ID: $world_id en puerto: $port"
+    cd "$SERVER_DIR"
     "$SERVER_BIN" --load "$world_id" --port "$port" --no-exit
 }
 
@@ -178,11 +210,23 @@ list_worlds() {
 
 # Función para eliminar un mundo
 delete_world() {
-    local world_id="$1"
+    local world_identifier="$1"
+    
+    # Determinar si es un ID o nombre
+    if [[ "$world_identifier" =~ ^[0-9]+$ ]]; then
+        # Es un ID numérico
+        local world_id="$world_identifier"
+    else
+        # Es un nombre, obtener el ID
+        local world_id=$(get_world_id_by_name "$world_identifier")
+        if [[ -z "$world_id" ]]; then
+            echo "Error: No existe un mundo con nombre '$world_identifier'"
+            exit 1
+        fi
+    fi
     
     # Verificar que el mundo existe
-    cd "$SERVER_DIR"
-    if ! "$SERVER_BIN" --list | grep -q "^$world_id"; then
+    if ! world_exists "$world_id"; then
         echo "Error: No existe un mundo con ID $world_id"
         exit 1
     fi
@@ -194,6 +238,7 @@ delete_world() {
     fi
     
     echo "Eliminando mundo ID: $world_id"
+    cd "$SERVER_DIR"
     "$SERVER_BIN" --delete "$world_id" --force
 }
 
@@ -208,7 +253,7 @@ case "$1" in
         ;;
     start)
         if [[ -z "$2" ]]; then
-            echo "Error: Se requiere el ID de un mundo"
+            echo "Error: Se requiere el ID o nombre de un mundo"
             exit 1
         fi
         start_world "$2" "$3"
@@ -218,7 +263,7 @@ case "$1" in
         ;;
     delete)
         if [[ -z "$2" ]]; then
-            echo "Error: Se requiere el ID de un mundo"
+            echo "Error: Se requiere el ID o nombre de un mundo"
             exit 1
         fi
         delete_world "$2"
