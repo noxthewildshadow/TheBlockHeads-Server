@@ -662,6 +662,23 @@ process_admin_command() {
     fi
 }
 
+# Helper: check whether the server already sent a welcome for this player recently
+server_sent_welcome_recently() {
+    local player_name="$1"
+    # safety: if LOG_FILE not set, return false
+    if [ -z "$LOG_FILE" ] || [ ! -f "$LOG_FILE" ]; then
+        return 1
+    fi
+
+    # Lowercase player and recent log lines to perform case-insensitive search
+    local player_lc=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
+    # Look at a reasonable number of recent lines (200)
+    if tail -n 200 "$LOG_FILE" 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -qE "welcome( back)?[^a-zA-Z0-9_]*${player_lc}"; then
+        return 0
+    fi
+    return 1
+}
+
 # Filter out server restart messages
 filter_server_log() {
     while read line; do
@@ -670,8 +687,8 @@ filter_server_log() {
             continue
         fi
         
-        # Skip server-generated welcome messages to avoid duplicates
-        if [[ "$line" == *"SERVER: say"* && "$line" == *"Welcome"* ]] || [[ "$line" == *"SERVER: say"* && "$line" == *"received"* && "$line" == *"ticket"* && "$line" == *"welcome bonus"* ]]; then
+        # Skip server-generated welcome messages to avoid duplicates (we still want them filtered from bot's processing)
+        if [[ "$line" == *"SERVER: say"* && "$line" == *"Welcome"* ]]; then
             continue
         fi
         
@@ -739,20 +756,31 @@ monitor_log() {
                 is_new_player="true"
             fi
             
-            # For new players, the server automatically sends welcome messages
-            # For returning players, we'll show a welcome message and grant login ticket
+            # For new players, the server usually handles the welcome; mark as shown
             if [ "$is_new_player" = "true" ]; then
-                # Server will handle the welcome message for new players
                 echo "New player $player_name connected - server will handle welcome message"
                 welcome_shown["$player_name"]=1
-            else
-                # Only show welcome message if not shown in this session
-                if [ -z "${welcome_shown[$player_name]}" ]; then
+                # Do not grant login ticket immediately for brand-new players (they already got the welcome bonus in give_first_time_bonus)
+                continue
+            fi
+
+            # Returning player: wait a short time so the server can send its own welcome if it does
+            if [ -z "${welcome_shown[$player_name]}" ]; then
+                # Wait 5 seconds as requested
+                sleep 5
+
+                # If server already sent a welcome message in the recent log, skip bot welcome
+                if server_sent_welcome_recently "$player_name"; then
+                    echo "Server already sent welcome for $player_name; skipping bot welcome."
+                    welcome_shown["$player_name"]=1
+                else
                     show_welcome_message "$player_name" "$is_new_player"
                     welcome_shown["$player_name"]=1
                 fi
-                grant_login_ticket "$player_name"
             fi
+
+            # After welcome logic, always attempt to grant login ticket for returning players
+            grant_login_ticket "$player_name"
             continue
         fi
 
