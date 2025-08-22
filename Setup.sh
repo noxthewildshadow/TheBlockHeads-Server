@@ -85,8 +85,14 @@ setup_server() {
     print_status "Descargando el servidor de The Blockheads..."
     curl -sL https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz | tar xz -C ./ > /dev/null 2>&1
 
+    # Verificar que el binario se descargó correctamente
+    if [[ ! -f "blockheads_server171" ]]; then
+        print_error "Error: El binario blockheads_server171 no se descargó correctamente"
+        exit 1
+    fi
+
     print_status "Aplicando parches al binario..."
-    # Hacer patchelf no fatal con || true
+    # Aplicar parches de forma no fatal
     patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 blockheads_server171 > /dev/null 2>&1 || true
     patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 blockheads_server171 > /dev/null 2>&1 || true
     patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 blockheads_server171 > /dev/null 2>&1 || true
@@ -101,42 +107,18 @@ setup_server() {
     chmod +x blockheads_server171
     
     # Verificar que el binario existe y es ejecutable
-    if [[ ! -x "$SERVER_BIN" ]]; then
-        print_error "Error: El binario del servidor no existe o no es ejecutable"
+    if [[ ! -f "blockheads_server171" ]]; then
+        print_error "Error: El binario blockheads_server171 no existe"
+        exit 1
+    fi
+    
+    if [[ ! -x "blockheads_server171" ]]; then
+        print_error "Error: El binario blockheads_server171 no es ejecutable"
         exit 1
     fi
     
     # Configurar directorio de mundos
     setup_worlds_directory
-}
-
-# Función robusta para obtener ID de mundo por nombre
-get_world_id_by_name() {
-    local world_name="$1"
-    cd "$SERVER_DIR" || return 1
-    local line id name
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        id="${line%%[[:space:]]*}"
-        name="${line#$id}"
-        name="$(echo "$name" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^[|:]//' -e 's/^[[:space:]]*//')"
-        if [[ "${name,,}" == "${world_name,,}" ]]; then
-            echo "$id"
-            return 0
-        fi
-    done < <("$SERVER_BIN" --list)
-    return 1
-}
-
-# Función robusta para verificar si un mundo existe
-world_exists() {
-    local world_id="$1"
-    cd "$SERVER_DIR" || return 1
-    if "$SERVER_BIN" --list | grep -q -E "^$world_id([[:space:]]|$|[:|])"; then
-        return 0
-    else
-        return 1
-    fi
 }
 
 # Crear script de gestión de mundos
@@ -216,8 +198,13 @@ create_world() {
     local extra_args=""
     
     # Verificar que el binario existe
+    if [[ ! -f "$SERVER_BIN" ]]; then
+        echo "Error: El binario del servidor no existe: $SERVER_BIN"
+        exit 1
+    fi
+    
     if [[ ! -x "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no existe o no es ejecutable: $SERVER_BIN"
+        echo "Error: El binario del servidor no es ejecutable: $SERVER_BIN"
         exit 1
     fi
     
@@ -274,8 +261,13 @@ start_world() {
     local world_id
     
     # Verificar que el binario existe
+    if [[ ! -f "$SERVER_BIN" ]]; then
+        echo "Error: El binario del servidor no existe: $SERVER_BIN"
+        exit 1
+    fi
+    
     if [[ ! -x "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no existe o no es ejecutable: $SERVER_BIN"
+        echo "Error: El binario del servidor no es ejecutable: $SERVER_BIN"
         exit 1
     fi
     
@@ -299,8 +291,13 @@ start_world() {
 # Función para listar mundos
 list_worlds() {
     # Verificar que el binario existe
+    if [[ ! -f "$SERVER_BIN" ]]; then
+        echo "Error: El binario del servidor no existe: $SERVER_BIN"
+        exit 1
+    fi
+    
     if [[ ! -x "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no existe o no es ejecutable: $SERVER_BIN"
+        echo "Error: El binario del servidor no es ejecutable: $SERVER_BIN"
         exit 1
     fi
     
@@ -315,8 +312,13 @@ delete_world() {
     local reply
     
     # Verificar que el binario existe
+    if [[ ! -f "$SERVER_BIN" ]]; then
+        echo "Error: El binario del servidor no existe: $SERVER_BIN"
+        exit 1
+    fi
+    
     if [[ ! -x "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no existe o no es ejecutable: $SERVER_BIN"
+        echo "Error: El binario del servidor no es ejecutable: $SERVER_BIN"
         exit 1
     fi
     
