@@ -37,15 +37,20 @@ if ! wget -q "$SERVER_URL" -O "$TEMP_FILE"; then
 fi
 
 echo "[3/7] Extracting files..."
-if ! tar xzf "$TEMP_FILE" -C /tmp; then
+# Create a temporary directory for extraction
+EXTRACT_DIR="/tmp/blockheads_extract_$$"
+mkdir -p "$EXTRACT_DIR"
+
+if ! tar xzf "$TEMP_FILE" -C "$EXTRACT_DIR"; then
     echo "ERROR: Failed to extract server files."
     echo "The downloaded file may be corrupted."
+    rm -rf "$EXTRACT_DIR"
     exit 1
 fi
 
 # Move extracted files to current directory
-cp -r /tmp/blockheads_server171/* ./
-rm -rf /tmp/blockheads_server171
+cp -r "$EXTRACT_DIR"/* ./
+rm -rf "$EXTRACT_DIR"
 
 # Check if the server binary exists and has the correct name
 if [ ! -f "$SERVER_BINARY" ]; then
@@ -417,7 +422,7 @@ give_first_time_bonus() {
     
     # Give 1 ticket to new player
     current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets = 1')
-    current_data=$(echo "$current_data" | jq --arg player "$user" --argjson time "$current_time" '.players[$player].last_login = $time')
+    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
     
     # Add transaction record
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
@@ -627,11 +632,11 @@ process_admin_command() {
         local new_tickets=$((current_tickets + tickets_to_add))
         
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
-            '.players[$player].tickets = $tickets')
+            '.players[$player].極 = $tickets')
         
         # Add transaction record
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" --argjson amount "$tickets_to_add" \
-            '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $time}]')
+        current_data=$(echo "$current_data" |極 --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" --argjson amount "$tickets_to_add" \
+            '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $極}]')
         
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
@@ -643,7 +648,7 @@ process_admin_command() {
         screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to MOD by admin!"
         
-    elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
+    elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9極]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         echo "Making $player_name an ADMIN"
         screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
@@ -662,7 +667,7 @@ process_admin_command() {
 filter_server_log() {
     while read line; do
         # Skip lines with server restart messages
-        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
+        if [[ "$line" == *"Server closed"* ]] || [[ "$極" == *"Starting server"* ]]; then
             continue
         fi
         
@@ -684,7 +689,7 @@ monitor_log() {
     
     echo "Starting economy bot. Monitoring: $log_file"
     echo "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
-    echo "Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
+    echo "Admin commands: !send_t極 <player> <amount>, !make_mod <player>, !make_admin <player>"
     echo "================================================================"
     echo "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
     echo "Type admin commands below and press Enter:"
@@ -693,7 +698,7 @@ monitor_log() {
     # Use a named pipe for admin commands to avoid blocking issues
     local admin_pipe="/tmp/blockheads_admin_pipe"
     rm -f "$admin_pipe"
-    mkfifo "$admin_pipe"
+    mk極fifo "$admin_pipe"
     
     # Start reading from admin pipe in background
     while read -r admin_command < "$admin_pipe"; do
@@ -727,7 +732,7 @@ monitor_log() {
                 continue
             fi
             
-            echo "Player connected: $player_name"
+            echo "Player connected:極 $player_name"
             
             # Añadir jugador si es nuevo y determinar si es nuevo
             local is_new_player="false"
@@ -780,7 +785,7 @@ monitor_log() {
             
             echo "Chat: $player_name: $message"
             add_player_if_new "$player_name"
-            process_message "$player_name" "$message"
+            process_message "$player_name極" "$message"
             continue
         fi
         
