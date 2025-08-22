@@ -98,75 +98,64 @@ SCREEN_BOT="blockheads_bot"
 
 # Función para mostrar uso
 show_usage() {
-    echo "Uso: $0 [start|stop|status|help]"
-    echo "  start   - Inicia el servidor y el bot"
-    echo "  stop    - Detiene el servidor y el bot"
-    echo "  status  - Muestra el estado del servidor y bot"
-    echo "  help    - Muestra esta ayuda"
+    echo "Uso: $0 start [WORLD_ID] [PORT]"
+    echo "  start WORLD_ID PORT - Inicia el servidor y el bot con el mundo y puerto especificados"
+    echo "  stop                - Detiene el servidor y el bot"
+    echo "  status              - Muestra el estado del servidor y bot"
+    echo "  help                - Muestra esta ayuda"
+    echo ""
+    echo "Ejemplo:"
+    echo "  $0 start c1ce8d817c47daa51356cdd4ab64f032 12153"
+    echo ""
+    echo "Nota: Primero debes crear un mundo manualmente con:"
+    echo "  ./blockheads_server171 -n"
 }
 
-# Función para obtener el ID del mundo
-get_world_id() {
-    # Si ya tenemos un world_id configurado, lo usamos
-    if [ -f "world_id.txt" ]; then
-        WORLD_ID=$(cat world_id.txt)
-        echo "Usando ID de mundo existente: $WORLD_ID"
-        return 0
-    fi
-    
-    # Buscar mundos existentes
+# Función para verificar si el mundo existe
+check_world_exists() {
+    local world_id="$1"
     local saves_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
-    if [ -d "$saves_dir" ]; then
-        local worlds=($(ls "$saves_dir"))
-        if [ ${#worlds[@]} -gt 0 ]; then
-            WORLD_ID="${worlds[0]}"
-            echo "$WORLD_ID" > world_id.txt
-            echo "Mundo detectado: $WORLD_ID"
-            return 0
-        fi
-    fi
+    local world_dir="$saves_dir/$world_id"
     
-    # Crear un nuevo mundo si no existe
-    echo "Creando nuevo mundo..."
-    $SERVER_BINARY -n 2>&1 | tee /tmp/blockheads_new_world.log
-    
-    # Extraer el ID del mundo del log
-    WORLD_ID=$(grep "World with id:" /tmp/blockheads_new_world.log | awk '{print $NF}')
-    
-    if [ -n "$WORLD_ID" ]; then
-        echo "$WORLD_ID" > world_id.txt
-        echo "Nuevo mundo creado: $WORLD_ID"
-        return 0
-    else
-        echo "Error: No se pudo crear o detectar un mundo."
+    if [ ! -d "$world_dir" ]; then
+        echo "Error: El mundo '$world_id' no existe."
+        echo "Primero crea un mundo con: ./blockheads_server171 -n"
         return 1
     fi
+    
+    return 0
 }
 
 # Función para iniciar el servidor
 start_server() {
+    local world_id="$1"
+    local port="${2:-$DEFAULT_PORT}"
+    
     if screen -list | grep -q "$SCREEN_SERVER"; then
         echo "El servidor ya está ejecutándose."
         return 0
     fi
     
-    if ! get_world_id; then
+    if ! check_world_exists "$world_id"; then
         return 1
     fi
     
     # Crear directorio de logs si no existe
-    local log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$WORLD_ID"
+    local log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id"
     local log_file="$log_dir/console.log"
     mkdir -p "$log_dir"
     
-    echo "Iniciando servidor con mundo: $WORLD_ID, puerto: $DEFAULT_PORT"
+    echo "Iniciando servidor con mundo: $world_id, puerto: $port"
+    
+    # Guardar world_id para futuros usos
+    echo "$world_id" > world_id.txt
     
     # Iniciar servidor en screen
     screen -dmS "$SCREEN_SERVER" bash -c "
         restart_count=0
         while true; do
             echo \"Iniciando servidor (reinicio #\$((++restart_count)))\"
-            $SERVER_BINARY -o '$WORLD_ID' -p $DEFAULT_PORT 2>&1 | tee -a '$log_file'
+            $SERVER_BINARY -o '$world_id' -p $port 2>&1 | tee -a '$log_file'
             echo 'Servidor cerrado, reiniciando en 3 segundos...'
             sleep 3
         done
@@ -268,7 +257,13 @@ show_status() {
 # Procesar argumentos
 case "$1" in
     start)
-        start_server
+        if [ -z "$2" ]; then
+            echo "Error: Debes especificar el WORLD_ID"
+            echo ""
+            show_usage
+            exit 1
+        fi
+        start_server "$2" "$3"
         ;;
     stop)
         stop_server
@@ -759,26 +754,25 @@ rm -f "$TEMP_FILE"
 echo "================================================================"
 echo "Installation completed successfully"
 echo "================================================================"
-echo "To start both server and bot: ./start_server.sh start"
-echo "To stop both server and bot: ./start_server.sh stop"
-echo "To check status: ./start_server.sh status"
+echo "IMPORTANT: First create a world manually with:"
+echo "  ./blockheads_server171 -n"
 echo ""
-echo "The system will automatically:"
-echo "- Detect or create a world"
-echo "- Start the server on port 12153"
-echo "- Start the economy bot"
-echo "- Prevent duplicate rank purchases"
-echo "- Send welcome messages to new players"
+echo "Then start the server and bot with:"
+echo "  ./start_server.sh start WORLD_ID PORT"
 echo ""
-echo "Economy features:"
-echo "- Players get 1 ticket every hour when they connect"
-echo "- New players get 1 ticket immediately"
-echo "- Commands: !tickets, !buy_mod (10), !buy_admin (20)"
-echo "- Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
+echo "Example:"
+echo "  ./start_server.sh start c1ce8d817c47daa51356cdd4ab64f032 12153"
 echo ""
-echo "IMPORTANT: For the bot to work properly, you MUST:"
-echo "1. Start the server with: ./start_server.sh start"
-echo "2. To send admin commands, type them in the BOT terminal (where ./bot_server.sh is running)"
+echo "Other commands:"
+echo "  ./start_server.sh stop     - Stop server and bot"
+echo "  ./start_server.sh status   - Show status"
+echo "  ./start_server.sh help     - Show help"
+echo ""
+echo "The system includes:"
+echo "- Automatic welcome messages for new players"
+echo "- Economy system with ticket rewards"
+echo "- Protection against duplicate rank purchases"
+echo "- Automatic server restarts"
 echo ""
 echo "Verifying executable..."
 if sudo -u "$ORIGINAL_USER" ./blockheads_server171 --help > /dev/null 2>&1; then
