@@ -26,7 +26,7 @@ echo "[1/7] Installing required packages..."
 {
     add-apt-repository multiverse -y
     apt-get update -y
-    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen
+    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen lsof
 } > /dev/null 2>&1
 
 echo "[2/7] Downloading server..."
@@ -37,11 +37,15 @@ if ! wget -q "$SERVER_URL" -O "$TEMP_FILE"; then
 fi
 
 echo "[3/7] Extracting files..."
-if ! tar xzf "$TEMP_FILE" -C .; then
+if ! tar xzf "$TEMP_FILE" -C /tmp; then
     echo "ERROR: Failed to extract server files."
     echo "The downloaded file may be corrupted."
     exit 1
 fi
+
+# Move extracted files to current directory
+cp -r /tmp/blockheads_server171/* ./
+rm -rf /tmp/blockheads_server171
 
 # Check if the server binary exists and has the correct name
 if [ ! -f "$SERVER_BINARY" ]; then
@@ -111,6 +115,42 @@ show_usage() {
     echo "  ./blockheads_server171 -n"
 }
 
+# Función para verificar si el puerto está en uso
+is_port_in_use() {
+    local port="$1"
+    if lsof -Pi ":$port" -sTCP:LISTEN -t >/dev/null ; then
+        return 0  # Puerto en uso
+    else
+        return 1  # Puerto libre
+    fi
+}
+
+# Función para liberar el puerto
+free_port() {
+    local port="$1"
+    echo "Intentando liberar el puerto $port..."
+    
+    # Matar procesos usando el puerto
+    local pids=$(lsof -ti ":$port")
+    if [ -n "$pids" ]; then
+        echo "Encontrados procesos usando el puerto $port: $pids"
+        kill -9 $pids 2>/dev/null
+        sleep 2
+    fi
+    
+    # Matar todas las sesiones de screen para evitar conflictos
+    killall screen 2>/dev/null
+    
+    # Verificar si el puerto quedó libre
+    if is_port_in_use "$port"; then
+        echo "ERROR: No se pudo liberar el puerto $port"
+        return 1
+    else
+        echo "Puerto $port liberado correctamente"
+        return 0
+    fi
+}
+
 # Función para verificar si el mundo existe
 check_world_exists() {
     local world_id="$1"
@@ -131,10 +171,18 @@ start_server() {
     local world_id="$1"
     local port="${2:-$DEFAULT_PORT}"
     
-    if screen -list | grep -q "$SCREEN_SERVER"; then
-        echo "El servidor ya está ejecutándose."
-        return 0
+    # Verificar y liberar el puerto primero
+    if is_port_in_use "$port"; then
+        echo "El puerto $port está en uso."
+        if ! free_port "$port"; then
+            echo "No se puede iniciar el servidor. El puerto $port no está disponible."
+            return 1
+        fi
     fi
+    
+    # Limpiar sesiones de screen existentes
+    killall screen 2>/dev/null
+    sleep 1
     
     if ! check_world_exists "$world_id"; then
         return 1
@@ -153,19 +201,46 @@ start_server() {
     # Iniciar servidor en screen
     screen -dmS "$SCREEN_SERVER" bash -c "
         restart_count=0
-        while true; do
+        max_restarts=3
+        while [ \$restart_count -lt \$max_restarts ]; do
             echo \"Iniciando servidor (reinicio #\$((++restart_count)))\"
-            $SERVER_BINARY -o '$world_id' -p $port 2>&1 | tee -a '$log_file'
-            echo 'Servidor cerrado, reiniciando en 3 segundos...'
-            sleep 3
+            if $SERVER_BINARY -o '$world_id' -p $port 2>&1 | tee -a '$log_file'; then
+                echo 'Servidor cerrado normalmente.'
+                break
+            else
+                exit_code=\$?
+                echo 'Servidor falló con código: ' \$exit_code
+                if [ \$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -q \"port.*already in use\"; then
+                    echo 'ERROR: Puerto ya en uso. No se reintentará.'
+                    break
+                fi
+                echo 'Reiniciando en 3 segundos...'
+                sleep 3
+            fi
         done
+        if [ \$restart_count -eq \$max_restarts ]; then
+            echo 'Se alcanzó el límite máximo de reinicios.'
+        fi
     "
     
     # Esperar a que el archivo de log exista
     echo "Esperando a que el servidor inicie..."
-    while [ ! -f "$log_file" ]; do
+    local wait_time=0
+    while [ ! -f "$log_file" ] && [ $wait_time -lt 10 ]; do
         sleep 1
+        ((wait_time++))
     done
+    
+    if [ ! -f "$log_file" ]; then
+        echo "ERROR: No se pudo crear el archivo de log. El servidor puede no haber iniciado."
+        return 1
+    fi
+    
+    # Verificar si el servidor inició correctamente
+    if grep -q "Failed to start server\|port.*already in use" "$log_file"; then
+        echo "ERROR: El servidor no pudo iniciarse. Verifique el puerto $port."
+        return 1
+    fi
     
     # Iniciar el bot después de que el servidor esté listo
     start_bot "$log_file"
@@ -218,6 +293,9 @@ stop_server() {
     # Limpiar procesos residuales
     pkill -f "$SERVER_BINARY" 2>/dev/null
     pkill -f "tail -n 0 -F" 2>/dev/null
+    
+    # Limpiar sesiones de screen
+    killall screen 2>/dev/null
 }
 
 # Función para mostrar estado
@@ -242,7 +320,6 @@ show_status() {
     if [ -f "world_id.txt" ]; then
         WORLD_ID=$(cat world_id.txt)
         echo "Mundo actual: $WORLD_ID"
-        echo "Puerto: $DEFAULT_PORT"
         
         # Mostrar información de jugadores si el servidor está ejecutándose
         if screen -list | grep -q "$SCREEN_SERVER"; then
@@ -340,7 +417,7 @@ give_first_time_bonus() {
     
     # Give 1 ticket to new player
     current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets = 1')
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
+    current_data=$(echo "$current_data" | jq --arg player "$user" --argjson time "$current_time" '.players[$player].last_login = $time')
     
     # Add transaction record
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
@@ -773,6 +850,7 @@ echo "- Automatic welcome messages for new players"
 echo "- Economy system with ticket rewards"
 echo "- Protection against duplicate rank purchases"
 echo "- Automatic server restarts"
+echo "- Port conflict resolution"
 echo ""
 echo "Verifying executable..."
 if sudo -u "$ORIGINAL_USER" ./blockheads_server171 --help > /dev/null 2>&1; then
