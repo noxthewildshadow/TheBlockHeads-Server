@@ -86,79 +86,203 @@ patchelf --replace-needed libdispatch.so libdispatch.so.0 "$SERVER_BINARY" || ec
 
 echo "Library compatibility patches applied (some warnings may be normal)"
 
-echo "[5/7] Creating start script..."
-cat > start.sh << 'EOF'
+echo "[5/7] Creating unified start script..."
+cat > start_server.sh << 'EOF'
 #!/bin/bash
 
-# Configurable settings - USER MUST CHANGE THESE!
-world_id="HERE_YOUR_WORLD_ID"
-server_port=12153
+# Configuración
+SERVER_BINARY="./blockheads_server171"
+DEFAULT_PORT=12153
+SCREEN_SERVER="blockheads_server"
+SCREEN_BOT="blockheads_bot"
 
-# Directories and paths
-log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id"
-log_file="$log_dir/console.log"
-server_binary="./blockheads_server171"
-
-# Check and create log directory
-if [ ! -d "$log_dir" ]; then
-    mkdir -p "$log_dir"
-    chmod 755 "$log_dir"
-fi
-
-# Verify the server executable exists
-if [ ! -f "$server_binary" ]; then
-    echo "Error: Cannot find server executable $server_binary"
-    exit 1
-fi
-
-# Ensure execute permissions
-if [ ! -x "$server_binary" ]; then
-    chmod +x "$server_binary"
-fi
-
-echo "================================================================"
-echo "Starting The Blockheads Server"
-echo "================================================================"
-echo "World ID: $world_id (Change this in start.sh if needed)"
-echo "Port: $server_port"
-echo "Logs: $log_file"
-echo ""
-echo "IMPORTANT FOR NEW WORLDS:"
-echo "1. If this is your first time, you need to create a world first!"
-echo "2. Join the server from your game to generate the world"
-echo "3. Stop the server with Ctrl+C once the world is created"
-echo "4. Edit start.sh to change 'HERE_YOUR_WORLD_ID' to your actual world ID"
-echo "5. Restart the server"
-echo ""
-echo "To stop the server: Press Ctrl+C"
-echo "================================================================"
-
-# Function to clean up on exit
-cleanup() {
-    echo ""
-    echo "Server stopped. Logs saved to: $log_file"
-    exit 0
+# Función para mostrar uso
+show_usage() {
+    echo "Uso: $0 [start|stop|status|help]"
+    echo "  start   - Inicia el servidor y el bot"
+    echo "  stop    - Detiene el servidor y el bot"
+    echo "  status  - Muestra el estado del servidor y bot"
+    echo "  help    - Muestra esta ayuda"
 }
 
-trap cleanup INT TERM
+# Función para obtener el ID del mundo
+get_world_id() {
+    # Si ya tenemos un world_id configurado, lo usamos
+    if [ -f "world_id.txt" ]; then
+        WORLD_ID=$(cat world_id.txt)
+        echo "Usando ID de mundo existente: $WORLD_ID"
+        return 0
+    fi
+    
+    # Buscar mundos existentes
+    local saves_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
+    if [ -d "$saves_dir" ]; then
+        local worlds=($(ls "$saves_dir"))
+        if [ ${#worlds[@]} -gt 0 ]; then
+            WORLD_ID="${worlds[0]}"
+            echo "$WORLD_ID" > world_id.txt
+            echo "Mundo detectado: $WORLD_ID"
+            return 0
+        fi
+    fi
+    
+    # Crear un nuevo mundo si no existe
+    echo "Creando nuevo mundo..."
+    $SERVER_BINARY -n 2>&1 | tee /tmp/blockheads_new_world.log
+    
+    # Extraer el ID del mundo del log
+    WORLD_ID=$(grep "World with id:" /tmp/blockheads_new_world.log | awk '{print $NF}')
+    
+    if [ -n "$WORLD_ID" ]; then
+        echo "$WORLD_ID" > world_id.txt
+        echo "Nuevo mundo creado: $WORLD_ID"
+        return 0
+    else
+        echo "Error: No se pudo crear o detectar un mundo."
+        return 1
+    fi
+}
 
-restart_count=0
-while true; do
-    restart_count=$((restart_count + 1))
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] Starting server (restart #$restart_count)" | tee -a "$log_file"
+# Función para iniciar el servidor
+start_server() {
+    if screen -list | grep -q "$SCREEN_SERVER"; then
+        echo "El servidor ya está ejecutándose."
+        return 0
+    fi
     
-    # Run server with real-time log output
-    $server_binary -o "$world_id" -p "$server_port" 2>&1 | tee -a "$log_file"
+    if ! get_world_id; then
+        return 1
+    fi
     
-    exit_code=${PIPESTATUS[0]}
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] Server closed (exit code: $exit_code), restarting in 3s..." | tee -a "$log_file"
-    sleep 3
-done
+    # Crear directorio de logs si no existe
+    local log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$WORLD_ID"
+    local log_file="$log_dir/console.log"
+    mkdir -p "$log_dir"
+    
+    echo "Iniciando servidor con mundo: $WORLD_ID, puerto: $DEFAULT_PORT"
+    
+    # Iniciar servidor en screen
+    screen -dmS "$SCREEN_SERVER" bash -c "
+        restart_count=0
+        while true; do
+            echo \"Iniciando servidor (reinicio #\$((++restart_count)))\"
+            $SERVER_BINARY -o '$WORLD_ID' -p $DEFAULT_PORT 2>&1 | tee -a '$log_file'
+            echo 'Servidor cerrado, reiniciando en 3 segundos...'
+            sleep 3
+        done
+    "
+    
+    # Esperar a que el archivo de log exista
+    echo "Esperando a que el servidor inicie..."
+    while [ ! -f "$log_file" ]; do
+        sleep 1
+    done
+    
+    # Iniciar el bot después de que el servidor esté listo
+    start_bot "$log_file"
+    
+    echo "Servidor iniciado correctamente."
+    echo "Para ver la consola: screen -r $SCREEN_SERVER"
+    echo "Para ver el bot: screen -r $SCREEN_BOT"
+}
+
+# Función para iniciar el bot
+start_bot() {
+    local log_file="$1"
+    
+    if screen -list | grep -q "$SCREEN_BOT"; then
+        echo "El bot ya está ejecutándose."
+        return 0
+    fi
+    
+    # Esperar a que el servidor esté completamente iniciado
+    echo "Esperando a que el servidor esté listo..."
+    sleep 5
+    
+    # Iniciar bot en screen separada
+    screen -dmS "$SCREEN_BOT" bash -c "
+        echo 'Iniciando bot del servidor...'
+        ./bot_server.sh '$log_file'
+    "
+    
+    echo "Bot iniciado correctamente."
+}
+
+# Función para detener todo
+stop_server() {
+    # Detener servidor
+    if screen -list | grep -q "$SCREEN_SERVER"; then
+        screen -S "$SCREEN_SERVER" -X quit
+        echo "Servidor detenido."
+    else
+        echo "El servidor no estaba ejecutándose."
+    fi
+    
+    # Detener bot
+    if screen -list | grep -q "$SCREEN_BOT"; then
+        screen -S "$SCREEN_BOT" -X quit
+        echo "Bot detenido."
+    else
+        echo "El bot no estaba ejecutándose."
+    fi
+    
+    # Limpiar procesos residuales
+    pkill -f "$SERVER_BINARY" 2>/dev/null
+    pkill -f "tail -n 0 -F" 2>/dev/null
+}
+
+# Función para mostrar estado
+show_status() {
+    echo "=== ESTADO DEL SERVIDOR THE BLOCKHEADS ==="
+    
+    # Verificar servidor
+    if screen -list | grep -q "$SCREEN_SERVER"; then
+        echo "Servidor: EJECUTÁNDOSE"
+    else
+        echo "Servidor: DETENIDO"
+    fi
+    
+    # Verificar bot
+    if screen -list | grep -q "$SCREEN_BOT"; then
+        echo "Bot: EJECUTÁNDOSE"
+    else
+        echo "Bot: DETENIDO"
+    fi
+    
+    # Mostrar información del mundo si existe
+    if [ -f "world_id.txt" ]; then
+        WORLD_ID=$(cat world_id.txt)
+        echo "Mundo actual: $WORLD_ID"
+        echo "Puerto: $DEFAULT_PORT"
+        
+        # Mostrar información de jugadores si el servidor está ejecutándose
+        if screen -list | grep -q "$SCREEN_SERVER"; then
+            echo "Para ver la consola: screen -r $SCREEN_SERVER"
+            echo "Para ver el bot: screen -r $SCREEN_BOT"
+        fi
+    fi
+    
+    echo "========================================"
+}
+
+# Procesar argumentos
+case "$1" in
+    start)
+        start_server
+        ;;
+    stop)
+        stop_server
+        ;;
+    status)
+        show_status
+        ;;
+    help|*)
+        show_usage
+        ;;
+esac
 EOF
 
-echo "[6/7] Creating bot server script..."
+echo "[6/7] Creating improved bot server script..."
 cat > bot_server.sh << 'EOF'
 #!/bin/bash
 
@@ -309,11 +433,10 @@ send_server_command() {
     local message="$1"
     
     # Send message directly without "say" prefix
-    if screen -S blockheads -X stuff "$message$(printf \\r)" 2>/dev/null; then
+    if screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null; then
         echo "Sent message to server: $message"
     else
-        echo "Error: Could not send message to server. Is the server running in a screen session named 'blockheads'?"
-        echo "Start the server with: screen -S blockheads -d -m ./start.sh"
+        echo "Error: Could not send message to server. Is the server running?"
     fi
 }
 
@@ -374,7 +497,7 @@ process_message() {
                 echo "$current_data" > "$ECONOMY_FILE"
                 
                 # Apply MOD rank to player using console command format
-                screen -S blockheads -X stuff "/mod $player_name$(printf \\r)"
+                screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
                 send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
                 send_server_command "$player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
@@ -399,7 +522,7 @@ process_message() {
                 echo "$current_data" > "$ECONOMY_FILE"
                 
                 # Apply ADMIN rank to player using console command format
-                screen -S blockheads -X stuff "/admin $player_name$(printf \\r)"
+                screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
                 send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
             else
                 send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
@@ -445,13 +568,13 @@ process_admin_command() {
     elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         echo "Making $player_name a MOD"
-        screen -S blockheads -X stuff "/mod $player_name$(printf \\r)"
+        screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to MOD by admin!"
         
     elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9_]+)$ ]]; then
         local player_name="${BASH_REMATCH[1]}"
         echo "Making $player_name an ADMIN"
-        screen -S blockheads -X stuff "/admin $player_name$(printf \\r)"
+        screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
         send_server_command "$player_name has been promoted to ADMIN by admin!"
         
     else
@@ -613,7 +736,8 @@ echo "[7/7] Creating stop server script..."
 cat > stop_server.sh << 'EOF'
 #!/bin/bash
 echo "Stopping Blockheads server and cleaning up sessions..."
-screen -S blockheads -X quit 2>/dev/null
+screen -S blockheads_server -X quit 2>/dev/null
+screen -S blockheads_bot -X quit 2>/dev/null
 pkill -f blockheads_server171
 pkill -f "tail -n 0 -F"  # Stop the bot if it's monitoring logs
 killall screen 2>/dev/null
@@ -622,8 +746,8 @@ screen -ls
 EOF
 
 # Set proper ownership and permissions
-chown "$ORIGINAL_USER:$ORIGINAL_USER" start.sh "$SERVER_BINARY" bot_server.sh stop_server.sh
-chmod 755 start.sh "$SERVER_BINARY" bot_server.sh stop_server.sh
+chown "$ORIGINAL_USER:$ORIGINAL_USER" start_server.sh "$SERVER_BINARY" bot_server.sh stop_server.sh
+chmod 755 start_server.sh "$SERVER_BINARY" bot_server.sh stop_server.sh
 
 # Create economy data file with proper ownership
 sudo -u "$ORIGINAL_USER" bash -c 'echo "{\"players\": {}, \"transactions\": []}" > economy_data.json'
@@ -635,37 +759,26 @@ rm -f "$TEMP_FILE"
 echo "================================================================"
 echo "Installation completed successfully"
 echo "================================================================"
-echo "To see server commands: ./blockheads_server171 --help"
-echo "To start the server run: screen -S blockheads -d -m ./start.sh"
-echo "To attach to server console: screen -r blockheads"
-echo "To detach from console: Ctrl+A then D"
+echo "To start both server and bot: ./start_server.sh start"
+echo "To stop both server and bot: ./start_server.sh stop"
+echo "To check status: ./start_server.sh status"
 echo ""
-echo "NOTE: The economy bot will be available but must be started manually"
-echo "after the server is running and a world has been created."
+echo "The system will automatically:"
+echo "- Detect or create a world"
+echo "- Start the server on port 12153"
+echo "- Start the economy bot"
+echo "- Prevent duplicate rank purchases"
+echo "- Send welcome messages to new players"
 echo ""
-echo "To start the economy bot run: ./bot_server.sh <path_to_log_file>"
-echo ""
-echo "Example for bot: ./bot_server.sh ~/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/HERE_YOUR_WORLD_ID/console.log"
-echo ""
-echo "To stop everything: ./stop_server.sh"
-echo ""
-echo "The economy bot features:"
+echo "Economy features:"
 echo "- Players get 1 ticket every hour when they connect"
 echo "- New players get 1 ticket immediately"
 echo "- Commands: !tickets, !buy_mod (10), !buy_admin (20)"
 echo "- Admin commands: !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
-echo "- Economy data saved in: economy_data.json"
 echo ""
 echo "IMPORTANT: For the bot to work properly, you MUST:"
-echo "1. Start the server in a screen session: screen -S blockheads -d -m ./start.sh"
-echo "2. In a new terminal, start the bot with the correct log file path"
-echo "3. To send admin commands, type them in the BOT terminal (where ./bot_server.sh is running)"
-echo ""
-echo "ADDITIONAL TIPS:"
-echo "- If you encounter an error like 'there is already a screen with the same host', use: killall screen"
-echo "- To view all active screen sessions: screen -ls"
-echo "- To force close all screen sessions: killall screen"
-echo "- Use ./stop_server.sh to cleanly stop everything"
+echo "1. Start the server with: ./start_server.sh start"
+echo "2. To send admin commands, type them in the BOT terminal (where ./bot_server.sh is running)"
 echo ""
 echo "Verifying executable..."
 if sudo -u "$ORIGINAL_USER" ./blockheads_server171 --help > /dev/null 2>&1; then
