@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Script de instalación para The Blockheads Server
-# Ejecutar con: curl -sSL https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server/main/Setup.sh | sudo bash
+# Ejecutar con: curl -sSL <tu_url>/Setup.sh | sudo bash
 
 set -euo pipefail
 trap 'echo "Error en la línea $LINENO. Abortando." >&2' ERR
@@ -23,7 +23,6 @@ check_ubuntu_version() {
         print_error "No se puede determinar la distribución de Linux"
         exit 1
     fi
-
     # shellcheck disable=SC1091
     source /etc/os-release
     if [[ "${ID:-}" != "ubuntu" || "${VERSION_ID:-}" != "22.04" ]]; then
@@ -47,11 +46,10 @@ install_dependencies() {
     apt-get install -y curl patchelf libgnustep-base1.28 libobjc4 libgnutls30 libgcrypt20 libffi8 libicu70 libdispatch0
 }
 
-# Configurar el directorio de mundos (REEMPLAZADA según petición)
+# Configurar el directorio de mundos (REEMPLAZADA para mover saves -> Saves)
 setup_worlds_directory() {
     print_status "Configurando directorio de mundos..."
 
-    # Determinar el home del usuario que ejecutó sudo (o usar $HOME si no)
     if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
         USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
     else
@@ -62,7 +60,6 @@ setup_worlds_directory() {
     SAVES_UPPER="$BASE_DIR/Saves"
     SAVES_LOWER="$BASE_DIR/saves"
 
-    # Si existe "saves" (minúsculas) y no existe "Saves", moverlo a la forma correcta
     if [[ -d "$SAVES_LOWER" && ! -d "$SAVES_UPPER" ]]; then
         print_status "Se encontró '$SAVES_LOWER'. Moviendo a '$SAVES_UPPER'..."
         mkdir -p "$BASE_DIR"
@@ -71,12 +68,10 @@ setup_worlds_directory() {
         }
     fi
 
-    # Asegurar existencia de la carpeta con la capitalización correcta
     mkdir -p "$SAVES_UPPER"
 
-    # Ajustar propietario si se ejecutó con sudo
     if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-        chown -R "$SUDO_USER:$SUDO_USER" "$USER_HOME/GNUstep"
+        chown -R "$SUDO_USER:$SUDO_USER" "$USER_HOME/GNUstep" 2>/dev/null || true
     fi
 
     WORLD_DIR="$SAVES_UPPER"
@@ -90,18 +85,14 @@ setup_server() {
     cd /opt/blockheads-server
 
     print_status "Descargando el servidor de The Blockheads..."
-    # URL de ejemplo: si el enlace cambia, reemplazar por uno válido
     SERVER_TAR_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 
-    # Descargar y extraer desde stdin
     if ! curl -sL "$SERVER_TAR_URL" | tar -xzf - -C ./; then
         print_error "Error al descargar o extraer el paquete desde: $SERVER_TAR_URL"
         exit 1
     fi
 
-    # Intentar localizar el binario (nombre esperado: blockheads_server171)
     if [[ ! -f "blockheads_server171" ]]; then
-        # buscar cualquier binario plausible
         BIN_CANDIDATE=$(find . -maxdepth 2 -type f -iname "blockheads_*" -print -quit || true)
         if [[ -n "$BIN_CANDIDATE" ]]; then
             mv "$BIN_CANDIDATE" ./blockheads_server171
@@ -115,7 +106,6 @@ setup_server() {
     fi
 
     print_status "Aplicando parches al binario (si son necesarios)..."
-    # Aplicar parches de forma no fatal
     patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 blockheads_server171 2>/dev/null || true
     patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 blockheads_server171 2>/dev/null || true
     patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 blockheads_server171 2>/dev/null || true
@@ -128,17 +118,15 @@ setup_server() {
 
     chmod +x blockheads_server171
 
-    # Verificación final
     if [[ ! -x "blockheads_server171" ]]; then
         print_error "Error: El binario blockheads_server171 no es ejecutable"
         exit 1
     fi
 
-    # Configurar directorio de mundos
     setup_worlds_directory
 }
 
-# Crear script de gestión de mundos
+# Crear script de gestión de mundos (mejor parsing de --list)
 create_management_script() {
     print_status "Creando script de gestión de mundos..."
 
@@ -165,10 +153,8 @@ POSSIBLE_BASE="$MGMT_USER_HOME/GNUstep/Library/ApplicationSupport/TheBlockheads"
 if [[ -d "$POSSIBLE_BASE/Saves" ]]; then
     WORLD_DIR="$POSSIBLE_BASE/Saves"
 elif [[ -d "$POSSIBLE_BASE/saves" ]]; then
-    # Si todavía existe la lowercase por cualquier motivo, usarla (compatibilidad)
     WORLD_DIR="$POSSIBLE_BASE/saves"
 else
-    # Preferir la capitalización correcta por defecto
     WORLD_DIR="$POSSIBLE_BASE/Saves"
 fi
 
@@ -182,7 +168,7 @@ Comandos:
   start <ID_O_NOMBRE> [PUERTO]      Iniciar un mundo existente
   list                              Listar todos los mundos
   delete <ID_O_NOMBRE>              Eliminar un mundo
-  debug-list                         Mostrar salida completa de --list (para debug)
+  debug-list                        Mostrar salida completa de --list (para debug)
   help                              Mostrar esta ayuda
 
 Opciones para create:
@@ -193,41 +179,63 @@ Opciones para create:
 HEREDOC
 }
 
-# get_world_info: devuelve la salida de --list
+# get_world_info: devuelve la salida de --list (sin modificarla)
 get_world_info() {
     (cd "$SERVER_DIR" && "$SERVER_BIN" --list) 2>/dev/null || true
 }
 
-# get_world_id_by_name: busca por nombre (case-insensitive), devuelve el primer ID encontrado
+# get_world_id_by_name: busca por nombre (case-insensitive) y extrae IDs hex de 32 caracteres
 get_world_id_by_name() {
     local world_name="$1"
     local world_info
     world_info=$(get_world_info)
 
-    # Leer línea por línea sin crear subshell
+    # leer cada línea e intentar extraer ID (32 hex) y nombre (si está entre comillas)
     while IFS= read -r line; do
-        # separar primer campo (id) del resto (nombre)
-        id=$(awk '{print $1}' <<< "$line")
-        name=$(awk '{$1=""; sub(/^ /,""); print}' <<< "$line")
-        if [[ -z "$id" ]]; then
-            continue
+        # extraer primer ID hex de 32 chars si existe
+        id=$(grep -Eo '([0-9a-fA-F]{32})' <<< "$line" | head -n1 || true)
+
+        # obtener nombre si está entre comillas dobles
+        name=""
+        if [[ $line =~ \"([^\"]+)\" ]]; then
+            name="${BASH_REMATCH[1]}"
+        elif [[ $line =~ \'([^\']+)\' ]]; then
+            name="${BASH_REMATCH[1]}"
+        else
+            # fallback: texto antes de "stored" o "named" u "in directory"
+            name=$(awk -F" stored| named| in directory| on port|, " '{print $1}' <<< "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         fi
-        # comparar en minúsculas para permitir coincidencias case-insensitive
-        if [[ "${name,,}" == *"${world_name,,}"* ]]; then
+
+        # si el nombre coincide parcialmente (case-insensitive) y hay id, devolver id
+        if [[ -n "$id" && -n "$name" && "${name,,}" == *"${world_name,,}"* ]]; then
             printf "%s\n" "$id"
             return 0
         fi
+
+        # si el user pasó directamente un id (32 hex) que coincide con id de la línea, devolverlo
+        if [[ "$world_name" =~ ^[0-9a-fA-F]{32}$ ]]; then
+            if [[ -n "$id" && "${id,,}" == "${world_name,,}" ]]; then
+                printf "%s\n" "$id"
+                return 0
+            fi
+        fi
     done <<< "$world_info"
+
+    # como último recurso: si world_name es id y aparece en cualquier parte de la salida, devolverla
+    if [[ "$world_name" =~ ^[0-9a-fA-F]{32}$ ]] && grep -Eq "${world_name}" <<< "$world_info"; then
+        printf "%s\n" "$world_name"
+        return 0
+    fi
 
     return 1
 }
 
-# world_exists: comprueba si el ID existe en la lista
+# world_exists: comprueba si el ID aparece en la salida de --list (en cualquier parte)
 world_exists() {
     local world_id="$1"
     local world_info
     world_info=$(get_world_info)
-    if awk '{print $1}' <<< "$world_info" | grep -Eq "^${world_id}\$"; then
+    if grep -Eq "${world_id}" <<< "$world_info"; then
         return 0
     else
         return 1
@@ -267,7 +275,7 @@ start_world() {
     local port="${2:-15151}"
     local world_id=""
 
-    if [[ "$world_identifier" =~ ^[0-9a-fA-F]+$ ]]; then
+    if [[ "$world_identifier" =~ ^[0-9a-fA-F]{32}$ ]]; then
         world_id="$world_identifier"
     else
         if ! world_id=$(get_world_id_by_name "$world_identifier"); then
@@ -296,7 +304,7 @@ delete_world() {
     local world_identifier="$1"
     local world_id=""
 
-    if [[ "$world_identifier" =~ ^[0-9a-fA-F]+$ ]]; then
+    if [[ "$world_identifier" =~ ^[0-9a-fA-F]{32}$ ]]; then
         world_id="$world_identifier"
     else
         if ! world_id=$(get_world_id_by_name "$world_identifier"); then
