@@ -34,8 +34,8 @@ check_ubuntu_version() {
     source /etc/os-release
     if [[ "$ID" != "ubuntu" || "$VERSION_ID" != "22.04" ]]; then
         print_warning "Este script está optimizado para Ubuntu 22.04. Puede que no funcione correctamente en otras distribuciones."
-        if [[ -n "$FORCE_CONTINUAR" ]]; then
-            print_status "Continuando por variable FORCE_CONTINUAR..."
+        if [[ -n "$FORCE_CONTINUE" ]]; then
+            print_status "Continuando por variable FORCE_CONTINUE..."
         else
             read -p "¿Continuar de todos modos? (y/N): " -n 1 -r
             echo
@@ -64,21 +64,13 @@ setup_worlds_directory() {
         USER_HOME="$HOME"
     fi
     
-    # Crear ambos directorios (Saves y saves) para mayor compatibilidad
-    WORLD_DIR_UPPER="$USER_HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/Saves"
-    WORLD_DIR_LOWER="$USER_HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
-    
-    mkdir -p "$WORLD_DIR_UPPER"
-    mkdir -p "$WORLD_DIR_LOWER"
+    # Crear ambos directorios para mayor compatibilidad
+    WORLD_DIR="$USER_HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/Saves"
+    mkdir -p "$WORLD_DIR"
     
     # Cambiar propietario si se ejecutó con sudo
     if [[ -n "$SUDO_USER" ]]; then
         chown -R "$SUDO_USER:$SUDO_USER" "$USER_HOME/GNUstep"
-    fi
-    
-    # Crear enlace simbólico para asegurar compatibilidad
-    if [[ ! -L "/opt/blockheads-server/Worlds" ]]; then
-        ln -sf "$WORLD_DIR_UPPER" /opt/blockheads-server/Worlds
     fi
 }
 
@@ -131,13 +123,6 @@ setup_server() {
 create_management_script() {
     print_status "Creando script de gestión de mundos..."
     
-    # Determinar el directorio de usuario
-    if [[ -n "$SUDO_USER" ]]; then
-        USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-    else
-        USER_HOME="$HOME"
-    fi
-    
     # Crear el script de gestión
     cat > /usr/local/bin/blockheads << 'EOF'
 #!/usr/bin/env bash
@@ -170,32 +155,85 @@ get_world_info() {
     "$SERVER_BIN" --list
 }
 
-# Función para obtener el ID de un mundo por nombre
-get_world_id_by_name() {
-    local world_name="$1"
+# Función para parsear la salida de --list y obtener ID y nombre
+parse_world_list() {
     local world_info=$(get_world_info)
-    echo "$world_info" | while read -r line; do
+    echo "$world_info" | while IFS= read -r line; do
         if [[ -n "$line" ]]; then
-            # Extraer ID (primer campo) y nombre (resto de la línea)
-            local id=$(echo "$line" | awk '{print $1}')
-            local name=$(echo "$line" | cut -d' ' -f2-)
-            if [[ "${name}" == "${world_name}" ]]; then
-                echo "$id"
-                return 0
+            # El formato es: "NOMBRE" stored in directory named ID
+            if [[ "$line" =~ \""(.*)\""\ stored\ in\ directory\ named\ ([0-9a-f]+)$ ]]; then
+                local name="${BASH_REMATCH[1]}"
+                local id="${BASH_REMATCH[2]}"
+                echo "$id $name"
             fi
         fi
     done
 }
 
-# Función para verificar si un mundo existe
-world_exists() {
+# Función para obtener el ID de un mundo por nombre
+get_world_id_by_name() {
+    local world_name="$1"
+    parse_world_list | while read -r id name; do
+        if [[ "$name" == "$world_name" ]]; then
+            echo "$id"
+            return 0
+        fi
+    done
+}
+
+# Función para obtener el nombre de un mundo por ID
+get_world_name_by_id() {
     local world_id="$1"
-    local world_info=$(get_world_info)
-    if echo "$world_info" | awk '{print $1}' | grep -q "^${world_id}$"; then
-        return 0
-    else
-        return 1
+    parse_world_list | while read -r id name; do
+        if [[ "$id" == "$world_id" ]]; then
+            echo "$name"
+            return 0
+        fi
+    done
+}
+
+# Función para verificar si un mundo existe por ID
+world_exists_by_id() {
+    local world_id="$1"
+    parse_world_list | while read -r id name; do
+        if [[ "$id" == "$world_id" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Función para verificar si un mundo existe por nombre
+world_exists_by_name() {
+    local world_name="$1"
+    parse_world_list | while read -r id name; do
+        if [[ "$name" == "$world_name" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Función para resolver un identificador (ID o nombre) a ID
+resolve_world_identifier() {
+    local identifier="$1"
+    
+    # Si es un ID válido (32 caracteres hexadecimales)
+    if [[ "$identifier" =~ ^[0-9a-f]{32}$ ]]; then
+        if world_exists_by_id "$identifier"; then
+            echo "$identifier"
+            return 0
+        fi
     fi
+    
+    # Si es un nombre, buscar el ID
+    local world_id=$(get_world_id_by_name "$identifier")
+    if [[ -n "$world_id" ]]; then
+        echo "$world_id"
+        return 0
+    fi
+    
+    return 1
 }
 
 # Función para crear un mundo
@@ -252,26 +290,12 @@ start_world() {
     local port="${2:-15151}"
     local world_id
     
-    # Determinar si es un ID o nombre
-    if [[ "$world_identifier" =~ ^[0-9a-fA-F]{8,}$ ]]; then
-        # Es un ID (mínimo 8 caracteres hexadecimales)
-        world_id="$world_identifier"
-    else
-        # Es un nombre, obtener el ID
-        world_id=$(get_world_id_by_name "$world_identifier")
-        if [[ -z "$world_id" ]]; then
-            echo "Error: No existe un mundo con nombre '$world_identifier'"
-            echo "Lista de mundos disponibles:"
-            get_world_info
-            exit 1
-        fi
-    fi
-    
-    # Verificar que el mundo existe
-    if ! world_exists "$world_id"; then
-        echo "Error: No existe un mundo con ID $world_id"
+    # Resolver el identificador (puede ser ID o nombre)
+    world_id=$(resolve_world_identifier "$world_identifier")
+    if [[ $? -ne 0 ]] || [[ -z "$world_id" ]]; then
+        echo "Error: No existe un mundo con identificador '$world_identifier'"
         echo "Lista de mundos disponibles:"
-        get_world_info
+        list_worlds
         exit 1
     fi
     
@@ -283,6 +307,7 @@ start_world() {
 # Función para listar mundos
 list_worlds() {
     cd "$SERVER_DIR"
+    echo "Mundos disponibles:"
     "$SERVER_BIN" --list
 }
 
@@ -290,37 +315,27 @@ list_worlds() {
 delete_world() {
     local world_identifier="$1"
     local world_id
+    local reply
     
-    # Determinar si es un ID o nombre
-    if [[ "$world_identifier" =~ ^[0-9a-fA-F]{8,}$ ]]; then
-        # Es un ID
-        world_id="$world_identifier"
-    else
-        # Es un nombre, obtener el ID
-        world_id=$(get_world_id_by_name "$world_identifier")
-        if [[ -z "$world_id" ]]; then
-            echo "Error: No existe un mundo con nombre '$world_identifier'"
-            echo "Lista de mundos disponibles:"
-            get_world_info
-            exit 1
-        fi
-    fi
-    
-    # Verificar que el mundo existe
-    if ! world_exists "$world_id"; then
-        echo "Error: No existe un mundo con ID $world_id"
+    # Resolver el identificador (puede ser ID o nombre)
+    world_id=$(resolve_world_identifier "$world_identifier")
+    if [[ $? -ne 0 ]] || [[ -z "$world_id" ]]; then
+        echo "Error: No existe un mundo con identificador '$world_identifier'"
         echo "Lista de mundos disponibles:"
-        get_world_info
+        list_worlds
         exit 1
     fi
     
-    read -r -p "¿Estás seguro de que quieres eliminar el mundo ID: $world_id? (y/N): " reply
+    # Obtener el nombre del mundo para mostrar
+    local world_name=$(get_world_name_by_id "$world_id")
+    
+    read -r -p "¿Estás seguro de que quieres eliminar el mundo '$world_name' (ID: $world_id)? (y/N): " reply
     echo
     if [[ ! $reply =~ ^[Yy]$ ]]; then
         exit 0
     fi
     
-    echo "Eliminando mundo ID: $world_id"
+    echo "Eliminando mundo '$world_name' (ID: $world_id)"
     cd "$SERVER_DIR"
     "$SERVER_BIN" --delete "$world_id" --force
 }
@@ -399,12 +414,12 @@ main() {
     echo ""
     echo "Para iniciar un mundo existente:"
     echo "  blockheads start ID_MUNDO [PUERTO]"
+    echo "  blockheads start NOMBRE_MUNDO [PUERTO]"
     echo ""
     echo "Para listar todos los mundos:"
     echo "  blockheads list"
     echo ""
     echo "El servidor se ha instalado en: /opt/blockheads-server"
-    echo "Los mundos se almacenan en: ~/GNUstep/Library/ApplicationSupport/TheBlockheads/"
 }
 
 # Ejecutar función principal
