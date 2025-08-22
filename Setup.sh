@@ -1,113 +1,114 @@
 #!/usr/bin/env bash
 
-#
-# Script de instalación para The Blockheads Server en Ubuntu 22.04 LTS
-#
-# Este script se encarga de:
-# 1. Instalar las dependencias de librerías necesarias de forma silenciosa.
-# 2. Descargar y extraer el binario del servidor.
-# 3. Parchear el binario para que sea compatible con las librerías de Ubuntu 22.04.
-# 4. Crear un script llamado 'start_world.sh' para facilitar el inicio de mundos.
-#
+# Script de instalación y configuración automática
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$INSTALL_DIR"
 
-# --- PARÁMETROS DE CONFIGURACIÓN ---
-# Puedes cambiar esta URL si se actualiza o la guardas en otro lugar
-SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
+# Colores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
-# --- PROCESO DE INSTALACIÓN ---
+# Función para imprimir mensajes
+print_status() {
+    echo -e "${GREEN}[+]${NC} $1"
+}
 
-echo "Iniciando la instalación de The Blockheads Server..."
-echo "Esto puede tardar unos minutos, por favor, espera..."
+print_error() {
+    echo -e "${RED}[-]${NC} $1"
+}
 
-# 1. Instalar dependencias necesarias de forma silenciosa
-# Se utilizan flags para evitar preguntas y reducir la salida en pantalla.
-sudo apt-get update -qq > /dev/null
-sudo apt-get install -y --no-install-recommends \
-    curl \
-    tar \
-    patchelf \
-    libgnustep-base1.28 \
-    libobjc-9-dev \
-    libgnutls30 \
-    libgcrypt20 \
-    libffi-dev \
-    libicu70 \
-    libdispatch0 > /dev/null
+print_warning() {
+    echo -e "${YELLOW}[!]${NC} $1"
+}
 
-if [ $? -ne 0 ]; then
-    echo "Error: No se pudieron instalar todas las dependencias. Verifica tu conexión a internet o los repositorios de APT."
-    exit 1
-fi
+# Verificar dependencias del sistema
+check_dependencies() {
+    local deps=("curl" "tar" "patchelf" "ldconfig")
+    local missing=()
 
-echo "Dependencias instaladas exitosamente."
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            missing+=("$dep")
+        fi
+    done
 
-# 2. Descargar, extraer y limpiar
-echo "Descargando el binario del servidor..."
-curl -sL "${SERVER_URL}" | tar xvz
-if [ $? -ne 0 ]; then
-    echo "Error: Falló la descarga o extracción del archivo del servidor."
-    exit 1
-fi
-echo "Binario descargado y extraído."
+    if [ ${#missing[@]} -ne 0 ]; then
+        print_warning "Instalando dependencias faltantes: ${missing[*]}"
+        sudo apt-get update
+        sudo apt-get install -y "${missing[@]}"
+    fi
+}
 
-# 3. Parchear el binario
-echo "Parcheando el binario para compatibilidad con Ubuntu 22.04..."
-patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 blockheads_server171
-patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 blockheads_server171
-patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 blockheads_server171
-patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 blockheads_server171
-patchelf --replace-needed libffi.so.6 libffi.so.8 blockheads_server171
-patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 blockheads_server171
-patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 blockheads_server171
-patchelf --replace-needed libicudata.so.48 libicudata.so.70 blockheads_server171
-patchelf --replace-needed libdispatch.so libdispatch.so.0 blockheads_server171
-echo "Parche completado."
+# Descargar y preparar el servidor
+setup_server() {
+    if [ ! -f "blockheads_server171" ]; then
+        print_status "Descargando servidor de The Blockheads..."
+        curl -sL https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz | tar xvz
+    fi
 
-# 4. Crear el script de inicio
-echo "Creando el script 'start_world.sh' para un fácil inicio de mundos..."
-cat << 'EOF' > start_world.sh
+    if [ ! -x "blockheads_server171" ]; then
+        chmod +x blockheads_server171
+    fi
+
+    # Parchear librerías
+    print_status "Aplicando parches de compatibilidad..."
+    patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 blockheads_server171 2>/dev/null
+    patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 blockheads_server171 2>/dev/null
+    patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 blockheads_server171 2>/dev/null
+    patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 blockheads_server171 2>/dev/null
+    patchelf --replace-needed libffi.so.6 libffi.so.8 blockheads_server171 2>/dev/null
+    patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 blockheads_server171 2>/dev/null
+    patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 blockheads_server171 2>/dev/null
+    patchelf --replace-needed libicudata.so.48 libicudata.so.70 blockheads_server171 2>/dev/null
+    patchelf --replace-needed libdispatch.so libdispatch.so.0 blockheads_server171 2>/dev/null
+}
+
+# Crear script de inicio
+create_start_script() {
+    cat > start_world.sh << 'EOF'
 #!/usr/bin/env bash
 
-#
-# Script para iniciar un mundo de The Blockheads Server.
-# Uso: ./start_world.sh <WORLD_ID> [PORT]
-# Ejemplo: ./start_world.sh 12345 15151
-#
-
-# Verificar el número de argumentos
-if [ -z "$1" ]; then
-    echo "Uso: ./start_world.sh <WORLD_ID> [PORT]"
-    exit 1
-fi
-
 WORLD_ID="$1"
-PORT="${2:-15151}"  # Si no se especifica un puerto, usa 15151 por defecto
+PORT="${2:-15151}"
 
-# Verificar si el binario existe
-if [ ! -f "blockheads_server171" ]; then
-    echo "Error: No se encontró el binario 'blockheads_server171' en este directorio."
+if [ -z "$WORLD_ID" ]; then
+    echo "Uso: $0 WORLD_ID [PUERTO]"
+    echo "Puerto predeterminado: 15151"
     exit 1
 fi
 
-echo "Iniciando mundo con ID: $WORLD_ID en el puerto: $PORT..."
-./blockheads_server171 --load "$WORLD_ID" --port "$PORT" --no-exit
-
+# Verificar si el mundo existe
+if ! ./blockheads_server171 --list | grep -q "[[:space:]]$WORLD_ID:"; then
+    echo "Creando nuevo mundo con ID: $WORLD_ID"
+    ./blockheads_server171 --new "Mundo_$WORLD_ID" --world_id "$WORLD_ID" --port "$PORT"
+else
+    echo "Cargando mundo existente: $WORLD_ID"
+    ./blockheads_server171 --load "$WORLD_ID" --port "$PORT"
+fi
 EOF
 
-chmod +x start_world.sh
-chmod +x blockheads_server171
+    chmod +x start_world.sh
+    print_status "Script de inicio creado: start_world.sh"
+}
 
-# 5. Mensaje final
-echo "---"
-echo "¡Instalación completada con éxito!"
-echo ""
-echo "Para crear un nuevo mundo, usa el siguiente comando:"
-echo "./blockheads_server171 --new NOMBRE_MUNDO --port PUERTO --expert-mode"
-echo ""
-echo "Cuando tengas el ID de tu mundo, puedes iniciarlo fácilmente con:"
-echo "./start_world.sh <ID_MUNDO> [PUERTO]"
-echo ""
-echo "Por ejemplo:"
-echo "./start_world.sh 12345 15151"
-echo ""
-echo "¡Disfruta tu servidor!"
+# Función principal
+main() {
+    print_status "Iniciando instalación automática..."
+    
+    check_dependencies
+    setup_server
+    create_start_script
+
+    print_status "Instalación completada!"
+    echo ""
+    print_warning "Para iniciar el servidor:"
+    echo "  ./start_world.sh <ID_MUNDO> [PUERTO]"
+    echo ""
+    print_warning "Para listar mundos existentes:"
+    echo "  ./blockheads_server171 --list"
+}
+
+# Ejecutar instalación
+main "$@"
