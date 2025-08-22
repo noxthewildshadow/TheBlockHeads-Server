@@ -11,6 +11,10 @@ fi
 # Get the original user who invoked sudo
 ORIGINAL_USER=${SUDO_USER:-$USER}
 USER_HOME=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6)
+if [ -z "$USER_HOME" ]; then
+    echo "ERROR: Could not determine home directory for user '$ORIGINAL_USER'."
+    exit 1
+fi
 
 # Configuration variables
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
@@ -55,13 +59,11 @@ rm -rf "$EXTRACT_DIR"
 # Check if the server binary exists and has the correct name
 if [ ! -f "$SERVER_BINARY" ]; then
     echo "WARNING: $SERVER_BINARY not found. Searching for alternative binary names..."
-    # Look for any executable file that might be the server
     ALTERNATIVE_BINARY=$(find . -name "*blockheads*" -type f -executable | head -n 1)
     
     if [ -n "$ALTERNATIVE_BINARY" ]; then
         echo "Found alternative binary: $ALTERNATIVE_BINARY"
         SERVER_BINARY=$(basename "$ALTERNATIVE_BINARY")
-        # Rename to the expected name
         mv "$ALTERNATIVE_BINARY" "blockheads_server171"
         echo "Renamed to: blockheads_server171"
     else
@@ -75,13 +77,11 @@ fi
 chmod +x "$SERVER_BINARY"
 
 echo "[4/7] Configuring library compatibility..."
-# Verify the binary exists before applying patches
 if [ ! -f "$SERVER_BINARY" ]; then
     echo "ERROR: Cannot find server binary $SERVER_BINARY for patching."
     exit 1
 fi
 
-# Apply library compatibility patches one by one with error checking
 echo "Applying library patches..."
 patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "$SERVER_BINARY" || echo "Warning: libgnustep-base patch may have failed"
 patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "$SERVER_BINARY" || echo "Warning: libobjc patch may have failed"
@@ -130,45 +130,24 @@ is_port_in_use() {
     fi
 }
 
-# Función para liberar el puerto
-free_port() {
-    local port="$1"
-    echo "Intentando liberar el puerto $port..."
-    
-    # Matar procesos usando el puerto
-    local pids=$(lsof -ti ":$port")
-    if [ -n "$pids" ]; then
-        echo "Encontrados procesos usando el puerto $port: $pids"
-        kill -9 $pids 2>/dev/null
-        sleep 2
+# Función para detener todo de forma segura
+stop_server() {
+    if screen -list | grep -q "$SCREEN_SERVER"; then
+        echo "Deteniendo el servidor Blockheads..."
+        screen -S "$SCREEN_SERVER" -X quit
     fi
-    
-    # Matar todas las sesiones de screen para evitar conflictos
-    killall screen 2>/dev/null
-    
-    # Verificar si el puerto quedó libre
-    if is_port_in_use "$port"; then
-        echo "ERROR: No se pudo liberar el puerto $port"
-        return 1
-    else
-        echo "Puerto $port liberado correctamente"
-        return 0
-    fi
-}
 
-# Función para verificar si el mundo existe
-check_world_exists() {
-    local world_id="$1"
-    local saves_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
-    local world_dir="$saves_dir/$world_id"
-    
-    if [ ! -d "$world_dir" ]; then
-        echo "Error: El mundo '$world_id' no existe."
-        echo "Primero crea un mundo con: ./blockheads_server171 -n"
-        return 1
+    if screen -list | grep -q "$SCREEN_BOT"; then
+        echo "Deteniendo el bot..."
+        screen -S "$SCREEN_BOT" -X quit
     fi
     
-    return 0
+    sleep 2
+
+    pkill -f "$SERVER_BINARY" 2>/dev/null
+    pkill -f "tail -n 0 -F" 2>/dev/null
+    
+    echo "Servidor y bot detenidos."
 }
 
 # Función para iniciar el servidor
@@ -176,83 +155,52 @@ start_server() {
     local world_id="$1"
     local port="${2:-$DEFAULT_PORT}"
     
-    # Verificar y liberar el puerto primero
+    stop_server
+    
     if is_port_in_use "$port"; then
-        echo "El puerto $port está en uso."
-        if ! free_port "$port"; then
-            echo "No se puede iniciar el servidor. El puerto $port no está disponible."
-            return 1
-        fi
+        echo "ERROR: El puerto $port ya está en uso. No se puede iniciar el servidor."
+        exit 1
     fi
     
-    # Limpiar sesiones de screen existentes
-    killall screen 2>/dev/null
-    sleep 1
-    
-    if ! check_world_exists "$world_id"; then
-        return 1
+    local saves_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
+    local world_dir="$saves_dir/$world_id"
+
+    if [ ! -d "$world_dir" ]; then
+        echo "Error: El mundo '$world_id' no existe."
+        echo "Primero crea un mundo con: ./blockheads_server171 -n"
+        exit 1
     fi
     
-    # Crear directorio de logs si no existe
     local log_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves/$world_id"
     local log_file="$log_dir/console.log"
     mkdir -p "$log_dir"
     
     echo "Iniciando servidor con mundo: $world_id, puerto: $port"
     
-    # Guardar world_id para futuros usos
-    echo "$world_id" > world_id.txt
-    
-    # Iniciar servidor en screen
     screen -dmS "$SCREEN_SERVER" bash -c "
-        restart_count=0
-        max_restarts=3
-        while [ \$restart_count -lt \$max_restarts ]; do
-            echo \"Iniciando servidor (reinicio #\$((++restart_count)))\"
-            if $SERVER_BINARY -o '$world_id' -p $port 2>&1 | tee -a '$log_file'; then
-                echo 'Servidor cerrado normalmente.'
-                break
-            else
-                exit_code=\$?
-                echo 'Servidor falló con código: ' \$exit_code
-                if [ \$exit_code -eq 1 ] && tail -n 5 '$log_file' | grep -q \"port.*already in use\"; then
-                    echo 'ERROR: Puerto ya en uso. No se reintentará.'
-                    break
-                fi
-                echo 'Reiniciando en 3 segundos...'
-                sleep 3
-            fi
-        done
-        if [ \$restart_count -eq \$max_restarts ]; then
-            echo 'Se alcanzó el límite máximo de reinicios.'
-        fi
+        echo 'Iniciando Blockheads server...'
+        $SERVER_BINARY -o '$world_id' -p '$port' 2>&1 | tee -a '$log_file'
     "
     
-    # Esperar a que el archivo de log exista
-    echo "Esperando a que el servidor inicie..."
     local wait_time=0
     while [ ! -f "$log_file" ] && [ $wait_time -lt 10 ]; do
+        echo "Esperando por el archivo de log..."
         sleep 1
         ((wait_time++))
     done
     
     if [ ! -f "$log_file" ]; then
         echo "ERROR: No se pudo crear el archivo de log. El servidor puede no haber iniciado."
-        return 1
+        exit 1
     fi
     
-    # Verificar si el servidor inició correctamente
-    if grep -q "Failed to start server\|port.*already in use" "$log_file"; then
-        echo "ERROR: El servidor no pudo iniciarse. Verifique el puerto $port."
-        return 1
-    fi
-    
-    # Iniciar el bot después de que el servidor esté listo
+    echo "Servidor iniciado. Esperando 5 segundos para que se estabilice..."
+    sleep 5
     start_bot "$log_file"
     
-    echo "Servidor iniciado correctamente."
-    echo "Para ver la consola: screen -r $SCREEN_SERVER"
-    echo "Para ver el bot: screen -r $SCREEN_BOT"
+    echo "Servidor y bot iniciados correctamente."
+    echo "Para ver la consola del servidor: screen -r $SCREEN_SERVER"
+    echo "Para ver la consola del bot: screen -r $SCREEN_BOT"
 }
 
 # Función para iniciar el bot
@@ -264,73 +212,27 @@ start_bot() {
         return 0
     fi
     
-    # Esperar a que el servidor esté completamente iniciado
-    echo "Esperando a que el servidor esté listo..."
-    sleep 5
-    
-    # Iniciar bot en screen separada
+    echo "Iniciando bot del servidor..."
     screen -dmS "$SCREEN_BOT" bash -c "
-        echo 'Iniciando bot del servidor...'
+        echo 'Iniciando bot de economía...'
         ./bot_server.sh '$log_file'
     "
-    
-    echo "Bot iniciado correctamente."
-}
-
-# Función para detener todo
-stop_server() {
-    # Detener servidor
-    if screen -list | grep -q "$SCREEN_SERVER"; then
-        screen -S "$SCREEN_SERVER" -X quit
-        echo "Servidor detenido."
-    else
-        echo "El servidor no estaba ejecutándose."
-    fi
-    
-    # Detener bot
-    if screen -list | grep -q "$SCREEN_BOT"; then
-        screen -S "$SCREEN_BOT" -X quit
-        echo "Bot detenido."
-    else
-        echo "El bot no estaba ejecutándose."
-    fi
-    
-    # Limpiar procesos residuales
-    pkill -f "$SERVER_BINARY" 2>/dev/null
-    pkill -f "tail -n 0 -F" 2>/dev/null
-    
-    # Limpiar sesiones de screen
-    killall screen 2>/dev/null
 }
 
 # Función para mostrar estado
 show_status() {
     echo "=== ESTADO DEL SERVIDOR THE BLOCKHEADS ==="
     
-    # Verificar servidor
     if screen -list | grep -q "$SCREEN_SERVER"; then
         echo "Servidor: EJECUTÁNDOSE"
     else
         echo "Servidor: DETENIDO"
     fi
     
-    # Verificar bot
     if screen -list | grep -q "$SCREEN_BOT"; then
         echo "Bot: EJECUTÁNDOSE"
     else
         echo "Bot: DETENIDO"
-    fi
-    
-    # Mostrar información del mundo si existe
-    if [ -f "world_id.txt" ]; then
-        WORLD_ID=$(cat world_id.txt)
-        echo "Mundo actual: $WORLD_ID"
-        
-        # Mostrar información de jugadores si el servidor está ejecutándose
-        if screen -list | grep -q "$SCREEN_SERVER"; then
-            echo "Para ver la consola: screen -r $SCREEN_SERVER"
-            echo "Para ver el bot: screen -r $SCREEN_BOT"
-        fi
     fi
     
     echo "========================================"
@@ -362,12 +264,13 @@ EOF
 echo "[6/7] Creating improved bot server script..."
 cat > bot_server.sh << 'EOF'
 #!/bin/bash
+set -e
 
 # Bot configuration
-ECONOMY_FILE="economy_data.json"
-SCAN_INTERVAL=5
+ECONOMY_FILE="./economy_data.json"
+declare -A WELCOME_SHOWN
 
-# Initialize economy data file if it doesn't exist
+# Ensure economy data file exists
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
         echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
@@ -375,43 +278,26 @@ initialize_economy() {
     fi
 }
 
-# Function to check if player is in mod/admin list
-is_player_in_list() {
-    local player_name="$1"
-    local list_type="$2"
-    
-    # Get world directory from log file path
-    local world_dir=$(dirname "$LOG_FILE")
-    local list_file="$world_dir/${list_type}list.txt"
-    
-    # Convert player name to lowercase (as stored in the lists)
-    local lower_player_name=$(echo "$player_name" | tr '[:upper:]' '[:lower:]')
-    
-    if [ -f "$list_file" ]; then
-        if grep -q "^$lower_player_name$" "$list_file"; then
-            return 0  # Player found in list
-        fi
-    fi
-    
-    return 1  # Player not found in list
+# Function to send command to server
+send_server_command() {
+    local message="$1"
+    screen -S blockheads_server -X stuff "$message$(printf \\r)"
 }
 
-# Add player to economy system if not exists
+# Add player to economy system if they don't exist
 add_player_if_new() {
     local player_name="$1"
     local current_data=$(cat "$ECONOMY_FILE")
     local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
-    
+
     if [ "$player_exists" = "false" ]; then
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')
+        current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player] = {"tickets": 0, "last_login": 0, "purchases": []}')
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Added new player: $player_name"
-        
-        # Give first-time bonus
         give_first_time_bonus "$player_name"
-        return 0  # New player
+        return 0 # New player
     fi
-    return 1  # Existing player
+    return 1 # Existing player
 }
 
 # Give first-time bonus to new players
@@ -420,11 +306,9 @@ give_first_time_bonus() {
     local current_data=$(cat "$ECONOMY_FILE")
     local current_time=$(date +%s)
     
-    # Give 1 ticket to new player
     current_data=$(echo "$current_data" | jq --arg player "$player_name" '.players[$player].tickets = 1')
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_login = $time')
     
-    # Add transaction record
     current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
         '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
     
@@ -438,12 +322,9 @@ grant_login_ticket() {
     local current_time=$(date +%s)
     local current_data=$(cat "$ECONOMY_FILE")
     
-    # Get last login time
     local last_login=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_login')
     
-    # Check if enough time has passed (1 hour = 3600 seconds)
-    if [ "$last_login" -eq 0 ] || [ $((current_time - last_login)) -ge 3600 ]; then
-        # Grant ticket
+    if [ $((current_time - last_login)) -ge 3600 ]; then
         local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
         local new_tickets=$((current_tickets + 1))
         
@@ -452,93 +333,17 @@ grant_login_ticket() {
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" \
             '.players[$player].last_login = $time')
         
-        # Add transaction record
         current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
             '.transactions += [{"player": $player, "type": "login_bonus", "tickets": 1, "time": $time}]')
         
         echo "$current_data" > "$ECONOMY_FILE"
         echo "Granted 1 ticket to $player_name for logging in (Total: $new_tickets)"
-        
-        # Send message to player
-        send_server_command "$player_name, you received 1 login ticket! You now have $new_tickets tickets."
+        send_server_command "SERVER:say $player_name, you received 1 login ticket! You now have $new_tickets tickets."
     else
         local next_login=$((last_login + 3600))
         local time_left=$((next_login - current_time))
         echo "$player_name must wait $((time_left / 60)) minutes for next ticket"
     fi
-}
-
-# Show welcome message with cooldown (3 minutes)
-show_welcome_message() {
-    local player_name="$1"
-    local is_new_player="$2"
-    local current_time=$(date +%s)
-    local current_data=$(cat "$ECONOMY_FILE")
-    local last_welcome_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_welcome_time')
-    
-    # Check if enough time has passed (3 minutes = 180 seconds)
-    if [ "$last_welcome_time" -eq 0 ] || [ $((current_time - last_welcome_time)) -ge 180 ]; then
-        if [ "$is_new_player" = "true" ]; then
-            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
-        else
-            send_server_command "Welcome back $player_name! Type !economy_help to see economy commands."
-        fi
-        
-        # Update last_welcome_time
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_welcome_time = $time')
-        echo "$current_data" > "$ECONOMY_FILE"
-    fi
-}
-
-# Show help message if needed (5 minutes cooldown)
-show_help_if_needed() {
-    local player_name="$1"
-    local current_time=$(date +%s)
-    local current_data=$(cat "$ECONOMY_FILE")
-    local last_help_time=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].last_help_time')
-    
-    if [ "$last_help_time" -eq 0 ] || [ $((current_time - last_help_time)) -ge 300 ]; then
-        send_server_command "$player_name, type !economy_help to see economy commands."
-        # Update last_help_time
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson time "$current_time" '.players[$player].last_help_time = $time')
-        echo "$current_data" > "$ECONOMY_FILE"
-    fi
-}
-
-# Send command to server using screen
-send_server_command() {
-    local message="$1"
-    
-    # Send message directly without "say" prefix
-    if screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null; then
-        echo "Sent message to server: $message"
-    else
-        echo "Error: Could not send message to server. Is the server running?"
-    fi
-}
-
-# Check if player has already purchased an item
-has_purchased() {
-    local player_name="$1"
-    local item="$2"
-    local current_data=$(cat "$ECONOMY_FILE")
-    local has_item=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases | index($item) != null')
-    
-    if [ "$has_item" = "true" ]; then
-        return 0  # Player has purchased this item
-    else
-        return 1  # Player has not purchased this item
-    fi
-}
-
-# Add purchase to player's record
-add_purchase() {
-    local player_name="$1"
-    local item="$2"
-    local current_data=$(cat "$ECONOMY_FILE")
-    
-    current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases += [$item]')
-    echo "$current_data" > "$ECONOMY_FILE"
 }
 
 # Process player message
@@ -549,258 +354,92 @@ process_message() {
     local player_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
     
     case "$message" in
-        "hi"|"hello"|"Hi"|"Hello"|"hola"|"Hola")
-            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
-            ;;
         "!tickets")
-            send_server_command "$player_name, you have $player_tickets tickets."
+            send_server_command "SERVER:say $player_name, you have $player_tickets tickets."
             ;;
         "!buy_mod")
-            # Check if player already has MOD rank
-            if has_purchased "$player_name" "mod" || is_player_in_list "$player_name" "mod"; then
-                send_server_command "$player_name, you already have MOD rank. No need to purchase again."
-            elif [ "$player_tickets" -ge 10 ]; then
+            if [ "$player_tickets" -ge 10 ]; then
                 local new_tickets=$((player_tickets - 10))
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
                     '.players[$player].tickets = $tickets')
                 
-                # Add purchase record
-                add_purchase "$player_name" "mod"
-                
-                # Add transaction record
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
                     '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
                 
                 echo "$current_data" > "$ECONOMY_FILE"
                 
-                # Apply MOD rank to player using console command format
                 screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
-                send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
+                send_server_command "SERVER:say Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
-                send_server_command "$player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
+                send_server_command "SERVER:say $player_name, you need $((10 - player_tickets)) more tickets to buy MOD rank."
             fi
             ;;
         "!buy_admin")
-            # Check if player already has ADMIN rank
-            if has_purchased "$player_name" "admin" || is_player_in_list "$player_name" "admin"; then
-                send_server_command "$player_name, you already have ADMIN rank. No need to purchase again."
-            elif [ "$player_tickets" -ge 20 ]; then
+            if [ "$player_tickets" -ge 20 ]; then
                 local new_tickets=$((player_tickets - 20))
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
                     '.players[$player].tickets = $tickets')
                 
-                # Add purchase record
-                add_purchase "$player_name" "admin"
-                
-                # Add transaction record
                 current_data=$(echo "$current_data" | jq --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" \
                     '.transactions += [{"player": $player, "type": "purchase", "item": "admin", "tickets": -20, "time": $time}]')
                 
                 echo "$current_data" > "$ECONOMY_FILE"
                 
-                # Apply ADMIN rank to player using console command format
                 screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
-                send_server_command "Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
+                send_server_command "SERVER:say Congratulations $player_name! You have been promoted to ADMIN for 20 tickets. Remaining tickets: $new_tickets"
             else
-                send_server_command "$player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
+                send_server_command "SERVER:say $player_name, you need $((20 - player_tickets)) more tickets to buy ADMIN rank."
             fi
             ;;
         "!economy_help")
-            send_server_command "Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN)"
+            send_server_command "SERVER:say Economy commands: !tickets (check your tickets), !buy_mod (10 tickets for MOD), !buy_admin (20 tickets for ADMIN)"
             ;;
     esac
 }
 
-# Process admin command from console
-process_admin_command() {
-    local command="$1"
-    local current_data=$(cat "$ECONOMY_FILE")
+# Main execution loop
+if [ $# -eq 1 ]; then
+    initialize_economy
+    LOG_FILE="$1"
     
-    if [[ "$command" =~ ^!send_ticket\ ([a-zA-Z0-9_]+)\ ([0-9]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        local tickets_to_add="${BASH_REMATCH[2]}"
-        
-        # Check if player exists
-        local player_exists=$(echo "$current_data" | jq --arg player "$player_name" '.players | has($player)')
-        if [ "$player_exists" = "false" ]; then
-            echo "Player $player_name not found in economy system."
-            return
-        fi
-        
-        # Add tickets
-        local current_tickets=$(echo "$current_data" | jq -r --arg player "$player_name" '.players[$player].tickets')
-        local new_tickets=$((current_tickets + tickets_to_add))
-        
-        current_data=$(echo "$current_data" | jq --arg player "$player_name" --argjson tickets "$new_tickets" \
-            '.players[$player].極 = $tickets')
-        
-        # Add transaction record
-        current_data=$(echo "$current_data" |極 --arg player "$player_name" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" --argjson amount "$tickets_to_add" \
-            '.transactions += [{"player": $player, "type": "admin_gift", "tickets": $amount, "time": $極}]')
-        
-        echo "$current_data" > "$ECONOMY_FILE"
-        echo "Added $tickets_to_add tickets to $player_name (Total: $new_tickets)"
-        send_server_command "$player_name received $tickets_to_add tickets from admin! Total: $new_tickets"
-        
-    elif [[ "$command" =~ ^!make_mod\ ([a-zA-Z0-9_]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        echo "Making $player_name a MOD"
-        screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)"
-        send_server_command "$player_name has been promoted to MOD by admin!"
-        
-    elif [[ "$command" =~ ^!make_admin\ ([a-zA-Z0-9極]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        echo "Making $player_name an ADMIN"
-        screen -S blockheads_server -X stuff "/admin $player_name$(printf \\r)"
-        send_server_command "$player_name has been promoted to ADMIN by admin!"
-        
-    else
-        echo "Unknown admin command: $command"
-        echo "Available admin commands:"
-        echo "!send_ticket <player> <amount>"
-        echo "!make_mod <player>"
-        echo "!make_admin <player>"
-    fi
-}
-
-# Filter out server restart messages
-filter_server_log() {
-    while read line; do
-        # Skip lines with server restart messages
-        if [[ "$line" == *"Server closed"* ]] || [[ "$極" == *"Starting server"* ]]; then
-            continue
-        fi
-        
-        # Skip server-generated welcome messages to avoid duplicates
-        if [[ "$line" == *"SERVER: say"*"Welcome"* ]] || [[ "$line" == *"SERVER: say"*"received"*"ticket"*"welcome bonus"* ]]; then
-            continue
-        fi
-        
-        # Output only relevant lines
-        echo "$line"
-    done
-}
-
-# Monitor server log
-monitor_log() {
-    local log_file="$1"
-    # Store log file path globally for list checking
-    LOG_FILE="$log_file"
-    
-    echo "Starting economy bot. Monitoring: $log_file"
+    echo "Starting economy bot. Monitoring: $LOG_FILE"
     echo "Bot commands: !tickets, !buy_mod, !buy_admin, !economy_help"
-    echo "Admin commands: !send_t極 <player> <amount>, !make_mod <player>, !make_admin <player>"
-    echo "================================================================"
-    echo "IMPORTANT: Admin commands must be typed in THIS terminal, NOT in the game chat!"
-    echo "Type admin commands below and press Enter:"
     echo "================================================================"
     
-    # Use a named pipe for admin commands to avoid blocking issues
-    local admin_pipe="/tmp/blockheads_admin_pipe"
-    rm -f "$admin_pipe"
-    mk極fifo "$admin_pipe"
-    
-    # Start reading from admin pipe in background
-    while read -r admin_command < "$admin_pipe"; do
-        echo "Processing admin command: $admin_command"
-        if [[ "$admin_command" == "!send_ticket "* ]] || [[ "$admin_command" == "!make_mod "* ]] || [[ "$admin_command" == "!make_admin "* ]]; then
-            process_admin_command "$admin_command"
-        else
-            echo "Unknown admin command. Use: !send_ticket <player> <amount>, !make_mod <player>, or !make_admin <player>"
-        fi
-        echo "================================================================"
-        echo "Ready for next admin command:"
-    done &
-    
-    # Also read from stdin and write to the pipe
-    while read -r admin_command; do
-        echo "$admin_command" > "$admin_pipe"
-    done &
-    
-    # Track if we've already shown welcome for this session
-    declare -A welcome_shown
-    
-    # Monitor log file for player activity
-    tail -n 0 -F "$log_file" | filter_server_log | while read line; do
-        # Detect player connections (formato específico del log)
+    tail -n 0 -F "$LOG_FILE" | while read line; do
         if [[ "$line" =~ Player\ Connected\ ([a-zA-Z0-9_]+)\ \| ]]; then
             local player_name="${BASH_REMATCH[1]}"
+            if [ "$player_name" == "SERVER" ]; then continue; fi
+
+            echo "Player connected: $player_name"
             
-            # Filtrar jugador "SERVER" y otros nombres del sistema
-            if [[ "$player_name" == "SERVER" ]]; then
-                echo "Ignoring system player: $player_name"
-                continue
-            fi
-            
-            echo "Player connected:極 $player_name"
-            
-            # Añadir jugador si es nuevo y determinar si es nuevo
-            local is_new_player="false"
             if add_player_if_new "$player_name"; then
-                is_new_player="true"
-            fi
-            
-            # For new players, the server automatically sends welcome messages
-            # For returning players, we'll show a welcome message and grant login ticket
-            if [ "$is_new_player" = "true" ]; then
-                # Server will handle the welcome message for new players
-                echo "New player $player_name connected - server will handle welcome message"
-                welcome_shown["$player_name"]=1
+                send_server_command "SERVER:say Welcome $player_name! You received your first ticket. Type !tickets to check your balance."
             else
-                # Only show welcome message if not shown in this session
-                if [ -z "${welcome_shown[$player_name]}" ]; then
-                    show_welcome_message "$player_name" "$is_new_player"
-                    welcome_shown["$player_name"]=1
-                fi
+                send_server_command "SERVER:say Welcome back $player_name! Type !economy_help for commands."
                 grant_login_ticket "$player_name"
             fi
             continue
         fi
 
-        # Detect player disconnections
         if [[ "$line" =~ Player\ Disconnected\ ([a-zA-Z0-9_]+) ]]; then
             local player_name="${BASH_REMATCH[1]}"
-            
-            # Filtrar jugador "SERVER"
-            if [[ "$player_name" == "SERVER" ]]; then
-                continue
-            fi
-            
+            if [ "$player_name" == "SERVER" ]; then continue; fi
             echo "Player disconnected: $player_name"
-            # Remove from welcome shown tracking
-            unset welcome_shown["$player_name"]
             continue
         fi
         
-        # Detect player messages
         if [[ "$line" =~ ([a-zA-Z0-9_]+):\ (.+)$ ]]; then
             local player_name="${BASH_REMATCH[1]}"
             local message="${BASH_REMATCH[2]}"
-            
-            # Filtrar mensajes del sistema
-            if [[ "$player_name" == "SERVER" ]]; then
-                echo "Ignoring system message: $message"
-                continue
-            fi
+            if [ "$player_name" == "SERVER" ]; then continue; fi
             
             echo "Chat: $player_name: $message"
-            add_player_if_new "$player_name"
-            process_message "$player_name極" "$message"
+            process_message "$player_name" "$message"
             continue
         fi
         
-        echo "Other log line: $line"
     done
-    
-    # Cleanup
-    wait
-    rm -f "$admin_pipe"
-}
-
-# Main execution
-if [ $# -eq 1 ]; then
-    initialize_economy
-    monitor_log "$1"
 else
     echo "Usage: $0 <server_log_file>"
     echo "Please provide the path to the server log file"
@@ -815,10 +454,10 @@ cat > stop_server.sh << 'EOF'
 echo "Stopping Blockheads server and cleaning up sessions..."
 screen -S blockheads_server -X quit 2>/dev/null
 screen -S blockheads_bot -X quit 2>/dev/null
-pkill -f blockheads_server171
-pkill -f "tail -n 0 -F"  # Stop the bot if it's monitoring logs
-killall screen 2>/dev/null
-echo "All Screen sessions and server processes have been stopped."
+sleep 1
+pkill -f "blockheads_server171" 2>/dev/null
+pkill -f "tail -n 0 -F" 2>/dev/null
+echo "All relevant Screen sessions and server processes have been stopped."
 screen -ls
 EOF
 
@@ -843,25 +482,10 @@ echo "Then start the server and bot with:"
 echo "  ./start_server.sh start WORLD_ID PORT"
 echo ""
 echo "Example:"
-echo "  ./start_server.sh start c1ce8d817c47daa51356cdd4ab64f032 12153"
+echo "  ./start_server.sh start a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6 12153"
 echo ""
-echo "Other commands:"
-echo "  ./start_server.sh stop     - Stop server and bot"
-echo "  ./start_server.sh status   - Show status"
-echo "  ./start_server.sh help     - Show help"
-echo ""
-echo "The system includes:"
-echo "- Automatic welcome messages for new players"
-echo "- Economy system with ticket rewards"
-echo "- Protection against duplicate rank purchases"
-echo "- Automatic server restarts"
-echo "- Port conflict resolution"
-echo ""
-echo "Verifying executable..."
-if sudo -u "$ORIGINAL_USER" ./blockheads_server171 --help > /dev/null 2>&1; then
-    echo "Status: Executable verified successfully"
-else
-    echo "Warning: The executable might have compatibility issues"
-    echo "You may need to manually install additional dependencies"
-fi
-echo "================================================================"
+echo "To manage the server, use:"
+echo "  ./start_server.sh status"
+echo "  ./start_server.sh stop"
+echo "To access the server console: screen -r blockheads_server"
+echo "To access the bot console: screen -r blockheads_bot"
