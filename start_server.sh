@@ -1,29 +1,22 @@
 #!/bin/bash
 
-# start_server.sh - start the server and the bot. Assumes working dir is the install directory.
-
 # Configuración
 SERVER_BINARY="./blockheads_server171"
 DEFAULT_PORT=12153
 SCREEN_SERVER="blockheads_server"
 SCREEN_BOT="blockheads_bot"
 
-# Función para mostrar uso
 show_usage() {
     echo "Uso: $0 start [WORLD_ID] [PORT]"
     echo "  start WORLD_ID PORT - Inicia el servidor y el bot con el mundo y puerto especificados"
     echo "  stop                - Detiene el servidor y el bot"
     echo "  status              - Muestra el estado del servidor y bot"
     echo "  help                - Muestra esta ayuda"
+    echo ""
+    echo "Nota: Primero debes crear un mundo manualmente con:"
+    echo "  ./blockheads_server171 -n"
 }
 
-# Verifica archivo binario
-if [ ! -f "$SERVER_BINARY" ]; then
-    echo "ERROR: $SERVER_BINARY no encontrado en el directorio actual."
-    exit 1
-fi
-
-# Verificar puerto en uso
 is_port_in_use() {
     local port="$1"
     if lsof -Pi ":$port" -sTCP:LISTEN -t >/dev/null ; then
@@ -35,14 +28,21 @@ is_port_in_use() {
 
 free_port() {
     local port="$1"
-    local pids
-    pids=$(lsof -ti ":$port")
+    echo "Intentando liberar el puerto $port..."
+    local pids=$(lsof -ti ":$port")
     if [ -n "$pids" ]; then
+        echo "Encontrados procesos usando el puerto $port: $pids"
         kill -9 $pids 2>/dev/null || true
-        sleep 1
+        sleep 2
     fi
     killall screen 2>/dev/null || true
-    is_port_in_use "$port" && return 1 || return 0
+    if is_port_in_use "$port"; then
+        echo "ERROR: No se pudo liberar el puerto $port"
+        return 1
+    else
+        echo "Puerto $port liberado correctamente"
+        return 0
+    fi
 }
 
 check_world_exists() {
@@ -50,7 +50,8 @@ check_world_exists() {
     local saves_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
     local world_dir="$saves_dir/$world_id"
     if [ ! -d "$world_dir" ]; then
-        echo "Error: El mundo '$world_id' no existe en $saves_dir"
+        echo "Error: El mundo '$world_id' no existe."
+        echo "Primero crea un mundo con: ./blockheads_server171 -n"
         return 1
     fi
     return 0
@@ -61,9 +62,9 @@ start_server() {
     local port="${2:-$DEFAULT_PORT}"
 
     if is_port_in_use "$port"; then
-        echo "Puerto $port en uso. Intentando liberar..."
+        echo "El puerto $port está en uso."
         if ! free_port "$port"; then
-            echo "No se pudo liberar el puerto $port"
+            echo "No se puede iniciar el servidor. El puerto $port no está disponible."
             return 1
         fi
     fi
@@ -100,71 +101,97 @@ start_server() {
         done
     "
 
-    # Esperar log
+    echo "Esperando a que el servidor inicie..."
     local wait_time=0
-    while [ ! -f "$log_file" ] && [ $wait_time -lt 15 ]; do
+    while [ ! -f "$log_file" ] && [ $wait_time -lt 10 ]; do
         sleep 1
         ((wait_time++))
     done
 
     if [ ! -f "$log_file" ]; then
-        echo "ERROR: no se creó $log_file; el servidor podría no haberse iniciado"
+        echo "ERROR: No se pudo crear el archivo de log. El servidor puede no haber iniciado."
         return 1
     fi
 
-    # Levantar bot
-    if screen -list | grep -q "$SCREEN_BOT"; then
-        echo "Bot ya en ejecución"
-    else
-        screen -dmS "$SCREEN_BOT" bash -c "echo 'Iniciando bot...' && ./bot_server.sh '$log_file'"
-        echo "Bot iniciado"
+    if grep -q "Failed to start server\|port.*already in use" "$log_file"; then
+        echo "ERROR: El servidor no pudo iniciarse. Verifique el puerto $port."
+        return 1
     fi
 
-    echo "Servidor iniciado correctamente. Usa screen -r $SCREEN_SERVER para ver consola"
+    start_bot "$log_file"
+
+    echo "Servidor iniciado correctamente."
+    echo "Para ver la consola: screen -r $SCREEN_SERVER"
+    echo "Para ver el bot: screen -r $SCREEN_BOT"
+}
+
+start_bot() {
+    local log_file="$1"
+
+    if screen -list | grep -q "$SCREEN_BOT"; then
+        echo "El bot ya está ejecutándose."
+        return 0
+    fi
+
+    echo "Esperando a que el servidor esté listo..."
+    sleep 5
+
+    screen -dmS "$SCREEN_BOT" bash -c "
+        echo 'Iniciando bot del servidor...'
+        ./bot_server.sh '$log_file'
+    "
+
+    echo "Bot iniciado correctamente."
 }
 
 stop_server() {
     if screen -list | grep -q "$SCREEN_SERVER"; then
         screen -S "$SCREEN_SERVER" -X quit
-        echo "Servidor detenido"
+        echo "Servidor detenido."
     else
-        echo "Servidor no estaba en ejecución"
+        echo "El servidor no estaba ejecutándose."
     fi
 
     if screen -list | grep -q "$SCREEN_BOT"; then
         screen -S "$SCREEN_BOT" -X quit
-        echo "Bot detenido"
+        echo "Bot detenido."
     else
-        echo "Bot no estaba en ejecución"
+        echo "El bot no estaba ejecutándose."
     fi
 
-    pkill -f "./$SERVER_BINARY" 2>/dev/null || true
+    pkill -f "$SERVER_BINARY" 2>/dev/null || true
     pkill -f "tail -n 0 -F" 2>/dev/null || true
     killall screen 2>/dev/null || true
 }
 
 show_status() {
-    echo "=== ESTADO DEL SERVIDOR ==="
+    echo "=== ESTADO DEL SERVIDOR THE BLOCKHEADS ==="
     if screen -list | grep -q "$SCREEN_SERVER"; then
-        echo "Servidor: EJECUTANDOSE"
+        echo "Servidor: EJECUTÁNDOSE"
     else
         echo "Servidor: DETENIDO"
     fi
     if screen -list | grep -q "$SCREEN_BOT"; then
-        echo "Bot: EJECUTANDOSE"
+        echo "Bot: EJECUTÁNDOSE"
     else
         echo "Bot: DETENIDO"
     fi
-    if [ -f world_id.txt ]; then
-        echo "Mundo actual: $(cat world_id.txt)"
+    if [ -f "world_id.txt" ]; then
+        WORLD_ID=$(cat world_id.txt)
+        echo "Mundo actual: $WORLD_ID"
+        if screen -list | grep -q "$SCREEN_SERVER"; then
+            echo "Para ver la consola: screen -r $SCREEN_SERVER"
+            echo "Para ver el bot: screen -r $SCREEN_BOT"
+        fi
     fi
-    echo "==========================="
+    echo "========================================"
 }
 
 case "$1" in
     start)
         if [ -z "$2" ]; then
-            echo "Debe indicar WORLD_ID"
+            echo "Error: Debes especificar el WORLD_ID"
+            show_usage
             exit 1
         fi
         start_server "$2" "$3"
@@ -175,7 +202,7 @@ case "$1" in
     status)
         show_status
         ;;
-    *)
+    help|*)
         show_usage
         ;;
 esac
