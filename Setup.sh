@@ -2,112 +2,125 @@
 set -euo pipefail
 
 # =====================================================
-# Setup.sh - Complete installer for The Blockheads server
-# Designed to run with:
+# Setup.sh - Instalador completo para The Blockheads server
+# Diseñado para ejecutarse con:
 #   curl -sSL https://raw.githubusercontent.com/noxthewildshadow/TheBlockHeads-Server/refs/heads/main/Setup.sh | sudo bash
 # =====================================================
 
-# Check running as root
+STEP=0
+total_steps=6
+run_step() {
+    STEP=$((STEP+1))
+    local desc="$1"
+    echo ""
+    echo "=== Paso ${STEP}/${total_steps}: ${desc} ==="
+}
+
+fail_exit() {
+    echo "[ERROR] $1"
+    exit 1
+}
+
+# Verificar root
 if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: This script must be run as root (sudo)."
-    echo "Example: curl -sSL <url> | sudo bash"
+    echo "ERROR: Este script debe ejecutarse como root (sudo)."
+    echo "Ejemplo: curl -sSL <url> | sudo bash"
     exit 1
 fi
 
 ORIGINAL_USER=${SUDO_USER:-$USER}
 USER_HOME=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6 || echo "/home/$ORIGINAL_USER")
 
-# Configuration
-# (Bundle hosted on web archive as fallback)
+# Configuración
+# URL del bundle (fallback a web.archive)
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 TEMP_FILE="/tmp/blockheads_server171.tar.gz"
 SERVER_BINARY="blockheads_server171"
 
 echo "===================================================="
-echo " The Blockheads Linux Server - Automated Installer"
-echo " Installing for user: $ORIGINAL_USER"
+echo " The Blockheads - Instalador automatizado"
+echo " Instalando para usuario: $ORIGINAL_USER (home: $USER_HOME)"
 echo "===================================================="
 
 # -----------------------
-# 1) Install dependencies
+# Paso 1: Instalar dependencias (silencioso, con fallback a mostrar salida)
 # -----------------------
-echo "[1/5] Installing required packages..."
-apt-get update -y
-# psmisc -> fuser, patchelf -> binary fixes, jq -> JSON, screen -> sessions, wget -> download
-apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen psmisc || {
-    echo "[WARN] Some packages failed to install automatically. Please run apt-get install manually if needed."
+run_step "Instalando dependencias (apt-get). Esto puede tardar..."
+{
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen psmisc >/dev/null 2>&1
+} || {
+    echo "[WARN] La instalación silenciosa falló. Reintentando mostrando salida..."
+    apt-get update -y
+    apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen psmisc || fail_exit "No se pudieron instalar dependencias. Ejecuta 'apt-get install' manualmente."
 }
-echo "[+] Dependencies installed (or already present)."
+echo "[OK] Dependencias procesadas."
 
 # -----------------------
-# 2) Download server
+# Paso 2: Descargar bundle del servidor (silencioso)
 # -----------------------
-echo "[2/5] Downloading server bundle..."
+run_step "Descargando paquete del servidor (silencioso)..."
 rm -f "$TEMP_FILE"
 if ! wget -q "$SERVER_URL" -O "$TEMP_FILE"; then
-    echo "ERROR: Failed to download the server package from $SERVER_URL"
-    exit 1
+    echo "[ERROR] No se pudo descargar el paquete desde: $SERVER_URL"
+    echo "Intentando descargar mostrando error..."
+    wget "$SERVER_URL" -O "$TEMP_FILE" || fail_exit "Descarga fallida. Revisa conexión o URL."
 fi
-echo "[+] Download complete."
+echo "[OK] Descarga completada."
 
 # -----------------------
-# 3) Extract files
+# Paso 3: Extraer archivos (silencioso)
 # -----------------------
-echo "[3/5] Extracting files to $(pwd)..."
-if ! tar xzf "$TEMP_FILE" -C .; then
-    echo "ERROR: Extraction failed. The archive may be corrupted."
-    echo "Listing archive contents for diagnosis:"
+run_step "Extrayendo archivos..."
+if ! tar xzf "$TEMP_FILE" -C . >/dev/null 2>&1; then
+    echo "[WARN] Extracción silenciosa falló. Listando contenido del tar para diagnóstico:"
     tar -tzf "$TEMP_FILE" || true
-    exit 1
+    fail_exit "Error al extraer el paquete. Archive corrupto o incompatibilidad."
 fi
+echo "[OK] Extracción completada."
 
-# If expected binary is not found, search for an executable candidate
+# -----------------------
+# Paso 4: Localizar binario y aplicar permisos
+# -----------------------
+run_step "Preparando binario del servidor y permisos..."
 if [ ! -f "./$SERVER_BINARY" ]; then
-    echo "[!] $SERVER_BINARY not found after extraction. Searching for an executable candidate..."
     ALTERNATIVE=$(find . -maxdepth 3 -type f -executable -iname "*blockheads*" | head -n1 || true)
     if [ -n "$ALTERNATIVE" ]; then
-        echo "[+] Found executable: $ALTERNATIVE"
         mv "$ALTERNATIVE" "./$SERVER_BINARY"
+        echo "[INFO] Movido ejecutable encontrado: $ALTERNATIVE -> ./$SERVER_BINARY"
     else
-        echo "ERROR: Could not find the server binary in the extracted archive."
-        tar -tzf "$TEMP_FILE"
-        exit 1
+        fail_exit "No se encontró el binario '$SERVER_BINARY' en el paquete extraído."
     fi
 fi
-
-chmod +x "./$SERVER_BINARY"
-echo "[+] Server binary ready: ./$SERVER_BINARY"
-
-# -----------------------
-# 4) Apply compatibility patches (patchelf) - best-effort
-# -----------------------
-echo "[4/5] Applying compatibility patches (best-effort)..."
-# These replace-needed calls are safe to attempt; failures are non-fatal.
-patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "./$SERVER_BINARY" 2>/dev/null || true
-patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "./$SERVER_BINARY" 2>/dev/null || true
-patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 "./$SERVER_BINARY" 2>/dev/null || true
-patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 "./$SERVER_BINARY" 2>/dev/null || true
-patchelf --replace-needed libffi.so.6 libffi.so.8 "./$SERVER_BINARY" 2>/dev/null || true
-patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 "./$SERVER_BINARY" 2>/dev/null || true
-patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 "./$SERVER_BINARY" 2>/dev/null || true
-patchelf --replace-needed libicudata.so.48 libicudata.so.70 "./$SERVER_BINARY" 2>/dev/null || true
-patchelf --replace-needed libdispatch.so libdispatch.so.0 "./$SERVER_BINARY" 2>/dev/null || true
-echo "[+] Patches attempted (warnings are okay)."
+chmod +x "./$SERVER_BINARY" || fail_exit "No se pudo hacer ejecutable: ./$SERVER_BINARY"
+echo "[OK] Binario listo: ./$SERVER_BINARY"
 
 # -----------------------
-# 5) Create helper scripts
+# Paso 5: Patchelf (compatibilidad) - mejor esfuerzo (silencioso)
 # -----------------------
-echo "[5/5] Creating helper scripts: start_server.sh, bot_server.sh, stop_server.sh ..."
+run_step "Aplicando parches de compatibilidad (patchelf - mejor esfuerzo)..."
+{
+    patchelf --replace-needed libgnustep-base.so.1.24 libgnustep-base.so.1.28 "./$SERVER_BINARY" 2>/dev/null || true
+    patchelf --replace-needed libobjc.so.4.6 libobjc.so.4 "./$SERVER_BINARY" 2>/dev/null || true
+    patchelf --replace-needed libgnutls.so.26 libgnutls.so.30 "./$SERVER_BINARY" 2>/dev/null || true
+    patchelf --replace-needed libgcrypt.so.11 libgcrypt.so.20 "./$SERVER_BINARY" 2>/dev/null || true
+    patchelf --replace-needed libffi.so.6 libffi.so.8 "./$SERVER_BINARY" 2>/dev/null || true
+    patchelf --replace-needed libicui18n.so.48 libicui18n.so.70 "./$SERVER_BINARY" 2>/dev/null || true
+    patchelf --replace-needed libicuuc.so.48 libicuuc.so.70 "./$SERVER_BINARY" 2>/dev/null || true
+    patchelf --replace-needed libicudata.so.48 libicudata.so.70 "./$SERVER_BINARY" 2>/dev/null || true
+    patchelf --replace-needed libdispatch.so libdispatch.so.0 "./$SERVER_BINARY" 2>/dev/null || true
+} || true
+echo "[OK] Parches intentados (warnings no fatales)."
+
+# -----------------------
+# Paso 6: Crear scripts auxiliares (start, bot, stop, create_world)
+# -----------------------
+run_step "Creando scripts auxiliares: start_server.sh, bot_server.sh, stop_server.sh, create_world.sh ..."
 
 # START SERVER
 cat > start_server.sh <<'EOF'
 #!/bin/bash
 set -euo pipefail
-
-# start_server.sh
-# Usage: ./start_server.sh start WORLD_ID [PORT]
-#        ./start_server.sh stop
-#        ./start_server.sh status
 
 SERVER_BINARY="./blockheads_server171"
 DEFAULT_PORT=12153
@@ -116,17 +129,17 @@ SCREEN_BOT="blockheads_bot"
 
 show_usage() {
     cat <<EOM
-Usage: $0 start WORLD_ID [PORT]
-  start WORLD_ID [PORT] - Start the server and the bot for the given world and port
-  stop                  - Stop the server and the bot
-  status                - Show status
-  help                  - Show this help
+Uso:
+  $0 start WORLD_ID [PORT]   - Inicia servidor y bot para el world
+  $0 stop                    - Para servidor y bot (sesiones screen)
+  $0 status                  - Muestra estado
+  $0 create_world            - Crea un mundo nuevo y muestra SOLO el World ID
 
-Example:
+Ejemplo:
   $0 start c1ce8d817c47daa51356cdd4ab64f032 12153
 
-Note: Create a new world first with:
-  ./blockheads_server171 -n
+Nota: Para crear un mundo desde el binario sin mucha salida:
+  ./create_world.sh
 EOM
 }
 
@@ -135,20 +148,16 @@ check_world_exists() {
     local saves_dir="$HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/saves"
     local world_dir="$saves_dir/$world_id"
     if [ ! -d "$world_dir" ]; then
-        echo "Error: World '$world_id' not found at: $world_dir"
+        echo "Error: World '$world_id' no encontrado en: $world_dir"
         return 1
     fi
     return 0
 }
 
-# Stop only the named sessions and related processes (non-destructive)
 cleanup_named_sessions() {
-    # Stop named screen sessions if they exist
     screen -S "$SCREEN_BOT" -X quit 2>/dev/null || true
     screen -S "$SCREEN_SERVER" -X quit 2>/dev/null || true
-    # Kill any leftover server process by binary name
     pkill -f "$SERVER_BINARY" 2>/dev/null || true
-    # Optionally try to stop tails used by the bot
     pkill -f "tail -n 0 -F" 2>/dev/null || true
 }
 
@@ -156,12 +165,11 @@ start_server() {
     local world_id="$1"
     local port="${2:-$DEFAULT_PORT}"
 
-    echo "[start] Cleaning up previous named sessions (server & bot only)..."
+    echo "[start] Limpiando sesiones previas..."
     cleanup_named_sessions
 
     if screen -list | grep -q "$SCREEN_SERVER"; then
-        echo "Server already running (screen session found)."
-        echo "To force restart: $0 stop && $0 start $world_id $port"
+        echo "[start] El servidor ya parece estar corriendo (screen detectado). Para forzar restart: $0 stop && $0 start $world_id $port"
         return 0
     fi
 
@@ -173,14 +181,15 @@ start_server() {
     mkdir -p "$log_dir"
     local log_file="$log_dir/console.log"
 
-    echo "[start] Starting server for world: $world_id on port $port"
+    echo "[start] Iniciando servidor para world: $world_id en puerto $port"
     echo "$world_id" > world_id.txt
 
-    # Attempt to free port if in use (best-effort)
+    # Intento liberar puerto (mejor esfuerzo)
     if command -v fuser >/dev/null 2>&1; then
         fuser -k "${port}/tcp" 2>/dev/null || true
     else
         if ss -ltnp 2>/dev/null | grep -q ":${port} "; then
+            echo "[start] Puerto $port parece ocupado, matando procesos asociados (mejor esfuerzo)."
             ss -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $6}' | cut -d',' -f2 | cut -d'=' -f2 | while read -r pid; do
                 [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
             done
@@ -198,8 +207,7 @@ while true; do
 done
 "
 
-    # Wait for log to appear (with timeout)
-    echo "[start] Waiting for log file: $log_file"
+    echo "[start] Esperando creación de archivo de log (timeout 30s)..."
     local waited=0
     local maxwait=30
     while [ ! -f "$log_file" ] && [ $waited -lt $maxwait ]; do
@@ -208,42 +216,42 @@ done
     done
 
     if [ ! -f "$log_file" ]; then
-        echo "[warn] Log file did not appear in $maxwait seconds. Check server binary permissions and output."
+        echo "[warn] El log no apareció en $maxwait s. Revisa permisos o salida del binario."
     else
-        echo "[+] Log file created: $log_file"
+        echo "[OK] Log creado: $log_file"
     fi
 
     start_bot "$log_file"
 
-    echo "[start] Server and bot started. To attach to server console: screen -r $SCREEN_SERVER"
+    echo "[start] Servidor y bot iniciados. Para adjuntarte al console: screen -r $SCREEN_SERVER"
 }
 
 start_bot() {
     local log_file="$1"
     if screen -list | grep -q "$SCREEN_BOT"; then
-        echo "Bot already running."
+        echo "[bot] El bot ya se encuentra corriendo."
         return 0
     fi
     sleep 5
     screen -dmS "$SCREEN_BOT" bash -c "
-echo '[bot] Starting bot - monitoring: $log_file'
+echo '[bot] Iniciando bot - monitor: $log_file'
 ./bot_server.sh '$log_file'
 "
-    echo "Bot started in screen session: $SCREEN_BOT"
+    echo "[bot] Bot iniciado en la sesión screen: $SCREEN_BOT"
 }
 
 stop_server() {
-    echo "[stop] Stopping server and bot (named sessions only)..."
+    echo "[stop] Parando servidor y bot..."
     cleanup_named_sessions
-    echo "[stop] Done. Check active screens with: screen -ls"
+    echo "[stop] Hecho. Revisa sesiones con: screen -ls"
 }
 
 show_status() {
-    echo "=== BLOCKHEADS STATUS ==="
+    echo "=== ESTADO THE BLOCKHEADS ==="
     if screen -list | grep -q "$SCREEN_SERVER"; then
-        echo "Server: RUNNING (screen: $SCREEN_SERVER)"
+        echo "Servidor: RUNNING (screen: $SCREEN_SERVER)"
     else
-        echo "Server: STOPPED"
+        echo "Servidor: STOPPED"
     fi
     if screen -list | grep -q "$SCREEN_BOT"; then
         echo "Bot: RUNNING (screen: $SCREEN_BOT)"
@@ -251,15 +259,15 @@ show_status() {
         echo "Bot: STOPPED"
     fi
     if [ -f world_id.txt ]; then
-        echo "Current world: $(cat world_id.txt)"
+        echo "World actual: $(cat world_id.txt)"
     fi
-    echo "========================="
+    echo "============================="
 }
 
 case "${1:-help}" in
     start)
         if [ -z "${2:-}" ]; then
-            echo "Error: WORLD_ID required for start."
+            echo "Error: WORLD_ID requerido."
             show_usage
             exit 1
         fi
@@ -271,20 +279,21 @@ case "${1:-help}" in
     status)
         show_status
         ;;
+    create_world)
+        ./create_world.sh
+        ;;
     help|*)
         show_usage
         ;;
 esac
 EOF
 
-# BOT SERVER (mejorado)
+# BOT SERVER (mejorado: evita duplicados y el "welcome b!" extraño)
 cat > bot_server.sh <<'EOF'
 #!/bin/bash
 set -euo pipefail
 
 # bot_server.sh (mejorado)
-# Uso: ./bot_server.sh /ruta/a/console.log
-
 ECONOMY_FILE="economy_data.json"
 LOG_FILE="${1:-}"
 
@@ -293,42 +302,34 @@ if [ -z "$LOG_FILE" ]; then
     exit 1
 fi
 
-# --- Envío: raw (sin 'say') y chat (con 'say') ---
 send_server_raw() {
     local message="$1"
-    # Intenta enviar texto directo a la consola del servidor.
     screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null || {
-        echo "[bot] Failed to send raw to server (is screen session running?)"
+        echo "[bot] no se pudo enviar raw (¿screen blockheads_server activo?)"
     }
 }
-
 send_server_chat() {
     local message="$1"
-    # Fuerza 'say' para asegurar que aparezca en chat si el servidor lo necesita.
     screen -S blockheads_server -X stuff "say $message$(printf \\r)" 2>/dev/null || {
-        echo "[bot] Failed to send chat to server (is screen session running?)"
+        echo "[bot] no se pudo enviar chat (¿screen blockheads_server activo?)"
     }
 }
-
-# Por compatibilidad, wrapper que intenta raw y si falla usa 'say'
 send_server_command() {
     local message="$1"
-    # Mensajes que son comandos de consola (comienzan con '/') deben enviarse raw
-    if [[ "$message" =~ ^/ ]] ; then
+    if [[ "$message" =~ ^/ ]]; then
         send_server_raw "$message"
         return
     fi
-    # Por defecto usamos raw para bienvenidas y respuestas; si no funciona, admin puede cambiar a send_server_chat
+    # Por defecto usamos raw para bienvenidas y respuestas
     send_server_raw "$message"
 }
 
-# --- utilidades para claves consistentes ---
 player_key() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
         echo '{"players": {}, "transactions": []}' > "$ECONOMY_FILE"
-        echo "[bot] Created economy file: $ECONOMY_FILE"
+        echo "[bot] economy file creado: $ECONOMY_FILE"
     fi
 }
 
@@ -340,6 +341,7 @@ is_player_in_list() {
     [ -f "$list_file" ] && grep -q "^$lower_name$" "$list_file"
 }
 
+# add_player_if_new: solo actualiza datos (no envía bienvenida)
 add_player_if_new() {
     local player_name="$1"
     local pkey; pkey=$(player_key "$player_name")
@@ -348,24 +350,21 @@ add_player_if_new() {
     if [ "$exists" = "false" ]; then
         current_data=$(echo "$current_data" | jq --arg player "$pkey" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')
         echo "$current_data" > "$ECONOMY_FILE"
-        give_first_time_bonus "$player_name"
+        give_first_time_bonus_data "$pkey"
         return 0
     fi
     return 1
 }
 
-give_first_time_bonus() {
-    local player_name="$1"
-    local pkey; pkey=$(player_key "$player_name")
+# Actualiza datos, no envía texto
+give_first_time_bonus_data() {
+    local pkey="$1"
     local current_data; current_data=$(cat "$ECONOMY_FILE")
     local now; now=$(date +%s)
     current_data=$(echo "$current_data" | jq --arg player "$pkey" '.players[$player].tickets = 1')
     current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson time "$now" '.players[$player].last_login = $time')
     current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
     echo "$current_data" > "$ECONOMY_FILE"
-    # Bienvenida: usamos raw para no requerir 'say'
-    send_server_command "Welcome $player_name! You received 1 welcome ticket."
-    echo "[bot] Welcome bonus given to $player_name"
 }
 
 grant_login_ticket() {
@@ -408,30 +407,28 @@ process_message() {
     local player_tickets; player_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
     player_tickets=${player_tickets:-0}
 
-    # Protección: si el message es extraño como "!b" (muy corto) ignorar para evitar respuestas raras
+    # Ignorar comandos sospechosos muy cortos como "!b"
     if [[ "${message}" =~ ^![a-zA-Z]{1,2}$ ]]; then
-        echo "[bot] Ignoring suspicious/short command message: $message"
+        echo "[bot] Ignorando mensaje corto/sospechoso: $message"
         return
     fi
 
     case "$message" in
         hi|hello|hola|Hola|Hi|Hello)
-            # Bienvenida simple: no hace falta 'say' según tu preferencia
-            send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
+            send_server_command "Hello $player_name! Type !economy_help to see economy commands."
             ;;
         "!tickets")
             send_server_command "$player_name, you have $player_tickets tickets."
             ;;
         "!buy_mod")
             if has_purchased "$player_name" "mod" || is_player_in_list "$player_name" "mod"; then
-                send_server_command "$player_name, you already have MOD rank. No need to purchase again."
+                send_server_command "$player_name, you already have MOD rank."
             elif [ "$player_tickets" -ge 10 ]; then
                 local new_tickets=$((player_tickets - 10))
                 current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
                 add_purchase "$player_name" "mod"
                 current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
                 echo "$current_data" > "$ECONOMY_FILE"
-                # El cambio de rango necesita slash; enviamos raw comando de consola ("/mod ...")
                 screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)" 2>/dev/null || true
                 send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
@@ -440,7 +437,7 @@ process_message() {
             ;;
         "!buy_admin")
             if has_purchased "$player_name" "admin" || is_player_in_list "$player_name" "admin"; then
-                send_server_command "$player_name, you already have ADMIN rank. No need to purchase again."
+                send_server_command "$player_name, you already have ADMIN rank."
             elif [ "$player_tickets" -ge 20 ]; then
                 local new_tickets=$((player_tickets - 20))
                 current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
@@ -454,7 +451,7 @@ process_message() {
             fi
             ;;
         "!economy_help")
-            send_server_command "Economy commands: !tickets, !buy_mod (10), !buy_admin (20)"
+            send_server_command "Economy commands: !tickets, !buy_mod (10), !buy_admin (20). Admins: !send_ticket <player> <amt>, !make_mod <player>, !make_admin <player>"
             ;;
     esac
 }
@@ -468,7 +465,7 @@ process_admin_command() {
         local pkey; pkey=$(player_key "$player_name")
         local player_exists; player_exists=$(echo "$current_data" | jq --arg player "$pkey" '.players | has($player)')
         if [ "$player_exists" = "false" ]; then
-            echo "Player $player_name not found in economy system."
+            echo "Player $player_name not found."
             return
         fi
         local current_tickets; current_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
@@ -494,8 +491,7 @@ process_admin_command() {
 
 filter_server_log() {
     while read -r line; do
-        # quitamos solo las líneas de arranque/restart muy evidentes (pero no "say" para no perder chats)
-        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]] ; then
+        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
             continue
         fi
         echo "$line"
@@ -504,13 +500,12 @@ filter_server_log() {
 
 monitor_log() {
     echo "[bot] Monitoring: $LOG_FILE"
-    echo "[bot] Commands: !tickets, !buy_mod, !buy_admin, !economy_help"
-    echo "[bot] Admin (in this terminal): !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
+    echo "[bot] Comandos disponibles (jugadores): !tickets, !buy_mod, !buy_admin, !economy_help"
+    echo "[bot] Comandos admin (escribirlos en esta terminal): !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
     echo "================================================================"
 
     local admin_pipe="/tmp/blockheads_admin_pipe_$$"
-    rm -f "$admin_pipe"
-    mkfifo "$admin_pipe"
+    rm -f "$admin_pipe"; mkfifo "$admin_pipe"
 
     ( while read -r admin_command; do
           echo "$admin_command" > "$admin_pipe"
@@ -520,11 +515,10 @@ monitor_log() {
           process_admin_command "$admin_command"
       done ) &
 
-    # welcome_shown keyed por player_key (minúsculas) para persistir entre cambios de mayúsculas
     declare -A welcome_shown
 
     tail -n 0 -F "$LOG_FILE" | filter_server_log | while read -r line; do
-        # 1) Detección flexible de "Player connected" (varios formatos)
+        # Detección flexible de join
         if [[ "$line" =~ Player.*Connected.*([a-zA-Z0-9_]+) ]]; then
             local raw_name="${BASH_REMATCH[1]}"
             local pkey; pkey=$(player_key "$raw_name")
@@ -533,10 +527,9 @@ monitor_log() {
             if add_player_if_new "$raw_name"; then
                 is_new="true"
             fi
-            # Si no se mostró la bienvenida (o fue reiniciado el bot), mostrarla otra vez y dar ticket
+            # Solo una bienvenida por sesión para evitar duplicados
             if [ -z "${welcome_shown[$pkey]:-}" ]; then
                 if [ "$is_new" = "true" ]; then
-                    # Bienvenida primera vez (raw)
                     send_server_command "Welcome $raw_name! Type !economy_help to see economy commands."
                 else
                     send_server_command "Welcome back $raw_name! Type !economy_help to see economy commands."
@@ -547,20 +540,20 @@ monitor_log() {
             continue
         fi
 
-        # 2) Disconnect detection (liberamos el flag para que al reconectar se vuelva a dar bienvenida)
+        # Disconnect -> limpiar flag
         if [[ "$line" =~ Player.*Disconnected.*([a-zA-Z0-9_]+) ]]; then
             local raw_name="${BASH_REMATCH[1]}"
             local pkey; pkey=$(player_key "$raw_name")
             unset welcome_shown[$pkey]
-            echo "[bot] Player disconnected: $raw_name (cleared welcome flag)"
+            echo "[bot] Player disconnected: $raw_name (welcome flag cleared)"
             continue
         fi
 
-        # 3) Chat detection: "<Player>: message" en cualquier parte de la línea
+        # Chat detection: "<Player>: message"
         if [[ "$line" =~ ([a-zA-Z0-9_]+):[[:space:]](.+) ]]; then
             local raw_name="${BASH_REMATCH[1]}"
             local message="${BASH_REMATCH[2]}"
-            # Protección: si el message es corto y extraño, ignorar
+            # Ignorar mensajes extraños y muy cortos como "!b"
             if [[ -z "$message" ]] || [[ "${message}" =~ ^![a-zA-Z]{1,2}$ ]]; then
                 echo "[bot] Ignored weird chat line from $raw_name: '$message'"
                 continue
@@ -580,48 +573,84 @@ initialize_economy
 monitor_log
 EOF
 
+# CREATE_WORLD wrapper: corre ./blockheads_server171 -n y muestra SOLO el ID encontrado
+cat > create_world.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+BIN="./blockheads_server171"
+TMP="/tmp/create_world_output_$$.log"
+
+if [ ! -x "$BIN" ]; then
+    echo "Error: $BIN no encontrado o no ejecutable."
+    exit 1
+fi
+
+# Ejecutar creación y capturar salida silenciosamente
+"$BIN" -n > "$TMP" 2>&1 || true
+
+# Buscar patrones comunes: UUID (36 chars) o 32 hex
+WORLD_ID=$(grep -Eo '[0-9a-fA-F\-]{36}' "$TMP" | head -n1 || true)
+if [ -z "$WORLD_ID" ]; then
+    WORLD_ID=$(grep -Eo '[0-9a-fA-F]{32}' "$TMP" | head -n1 || true)
+fi
+
+if [ -n "$WORLD_ID" ]; then
+    echo "$WORLD_ID"
+    rm -f "$TMP"
+    exit 0
+else
+    # Si no encontramos, mostramos la última línea por si el binario usa otro formato
+    tail -n 10 "$TMP"
+    rm -f "$TMP"
+    exit 1
+fi
+EOF
+
 # STOP SERVER
 cat > stop_server.sh <<'EOF'
 #!/bin/bash
 set -euo pipefail
-echo "[stop] Stopping named Blockheads sessions and cleaning up..."
+echo "[stop] Parando sesiones named y limpiando..."
 screen -S blockheads_server -X quit 2>/dev/null || true
 screen -S blockheads_bot -X quit 2>/dev/null || true
 pkill -f blockheads_server171 2>/dev/null || true
 pkill -f "tail -n 0 -F" 2>/dev/null || true
-echo "[stop] Done. Check running screens with: screen -ls"
+echo "[stop] Hecho."
 EOF
 
-# Make scripts executable and set ownership to original user
-chmod 755 start_server.sh bot_server.sh stop_server.sh "./$SERVER_BINARY"
-chown "$ORIGINAL_USER:$ORIGINAL_USER" start_server.sh bot_server.sh stop_server.sh "./$SERVER_BINARY" || true
+# Permisos y propiedad
+chmod 755 start_server.sh bot_server.sh stop_server.sh create_world.sh "./$SERVER_BINARY"
+chown "$ORIGINAL_USER:$ORIGINAL_USER" start_server.sh bot_server.sh stop_server.sh create_world.sh "./$SERVER_BINARY" || true
 
-# Create economy_data.json for the non-root user
+# Crear economy_data.json para el usuario no-root
+run_step "Creando archivo economy_data.json para $ORIGINAL_USER..."
 sudo -u "$ORIGINAL_USER" bash -c 'cat > economy_data.json <<JSON
 {"players": {}, "transactions": []}
 JSON'
 chown "$ORIGINAL_USER:$ORIGINAL_USER" economy_data.json || true
 chmod 644 economy_data.json
+echo "[OK] economy_data.json creado."
 
-# Cleanup downloaded archive
+# Limpieza
 rm -f "$TEMP_FILE" || true
 
-echo "===================================================="
-echo " Installation completed."
-echo " Quick start:"
-echo " 1) As $ORIGINAL_USER create a world: ./blockheads_server171 -n"
-echo " 2) Start the server: ./start_server.sh start WORLD_ID [PORT]"
-echo " 3) Stop: ./start_server.sh stop   (or ./stop_server.sh)"
 echo ""
-echo "Note: The installer now only closes the named screen sessions"
-echo "      'blockheads_server' and 'blockheads_bot' instead of killing all screens."
+echo "===================================================="
+echo " Instalación completada. Resumen rápido:"
+echo " - Ejecutables y scripts creados en: $(pwd)"
+echo " - Para crear un mundo y mostrar SOLO el ID: ./create_world.sh"
+echo " - Para iniciar servidor y bot: ./start_server.sh start WORLD_ID [PORT]"
+echo " - Para parar: ./start_server.sh stop  (o ./stop_server.sh)"
+echo ""
+echo "Comandos del bot (jugadores): !tickets, !buy_mod (10), !buy_admin (20), !economy_help"
+echo "Comandos admin (escribir en la terminal del bot): !send_ticket <player> <amount>, !make_mod <player>, !make_admin <player>"
 echo "===================================================="
 
-# Basic verification attempt (non-fatal)
+# Verificación no fatal
 if sudo -u "$ORIGINAL_USER" "./$SERVER_BINARY" --help >/dev/null 2>&1; then
-    echo "[OK] Server binary responds to --help."
+    echo "[OK] El binario responde a --help."
 else
-    echo "[WARN] Server binary may require additional dependencies on this system."
+    echo "[WARN] El binario puede necesitar dependencias adicionales en esta máquina."
 fi
 
 exit 0
