@@ -18,6 +18,7 @@ ORIGINAL_USER=${SUDO_USER:-$USER}
 USER_HOME=$(getent passwd "$ORIGINAL_USER" | cut -d: -f6 || echo "/home/$ORIGINAL_USER")
 
 # Configuration
+# (Bundle hosted on web archive as fallback)
 SERVER_URL="https://web.archive.org/web/20240309015235if_/https://majicdave.com/share/blockheads_server171.tar.gz"
 TEMP_FILE="/tmp/blockheads_server171.tar.gz"
 SERVER_BINARY="blockheads_server171"
@@ -32,7 +33,7 @@ echo "===================================================="
 # -----------------------
 echo "[1/5] Installing required packages..."
 apt-get update -y
-# psmisc -> fuser, patchelf -> binary fixes, jq -> JSON, screen -> sessions
+# psmisc -> fuser, patchelf -> binary fixes, jq -> JSON, screen -> sessions, wget -> download
 apt-get install -y libgnustep-base1.28 libdispatch0 patchelf wget jq screen psmisc || {
     echo "[WARN] Some packages failed to install automatically. Please run apt-get install manually if needed."
 }
@@ -63,7 +64,7 @@ fi
 # If expected binary is not found, search for an executable candidate
 if [ ! -f "./$SERVER_BINARY" ]; then
     echo "[!] $SERVER_BINARY not found after extraction. Searching for an executable candidate..."
-    ALTERNATIVE=$(find . -maxdepth 2 -type f -executable -iname "*blockheads*" | head -n1 || true)
+    ALTERNATIVE=$(find . -maxdepth 3 -type f -executable -iname "*blockheads*" | head -n1 || true)
     if [ -n "$ALTERNATIVE" ]; then
         echo "[+] Found executable: $ALTERNATIVE"
         mv "$ALTERNATIVE" "./$SERVER_BINARY"
@@ -98,7 +99,7 @@ echo "[+] Patches attempted (warnings are okay)."
 # -----------------------
 echo "[5/5] Creating helper scripts: start_server.sh, bot_server.sh, stop_server.sh ..."
 
-# START SERVER (English)
+# START SERVER
 cat > start_server.sh <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -276,12 +277,12 @@ case "${1:-help}" in
 esac
 EOF
 
-# BOT SERVER (patched and more robust)
+# BOT SERVER (mejorado)
 cat > bot_server.sh <<'EOF'
 #!/bin/bash
 set -euo pipefail
 
-# bot_server.sh (versión parcheada y más robusta)
+# bot_server.sh (mejorado)
 # Uso: ./bot_server.sh /ruta/a/console.log
 
 ECONOMY_FILE="economy_data.json"
@@ -292,21 +293,37 @@ if [ -z "$LOG_FILE" ]; then
     exit 1
 fi
 
-# Send to server as a chat message (use 'say' so server outputs to chat)
-send_server_command() {
+# --- Envío: raw (sin 'say') y chat (con 'say') ---
+send_server_raw() {
     local message="$1"
-    local cmd
-    # Use 'say' to broadcast. If you prefer private messages, change to "tell <player> <msg>"
-    cmd="say $message"
-    screen -S blockheads_server -X stuff "$cmd$(printf \\r)" 2>/dev/null || {
-        echo "[bot] Failed to send command to server (screen session may be missing)."
+    # Intenta enviar texto directo a la consola del servidor.
+    screen -S blockheads_server -X stuff "$message$(printf \\r)" 2>/dev/null || {
+        echo "[bot] Failed to send raw to server (is screen session running?)"
     }
 }
 
-# Helper: lowercase canonical player key for persistent storage
-player_key() {
-    echo "$1" | tr '[:upper:]' '[:lower:]'
+send_server_chat() {
+    local message="$1"
+    # Fuerza 'say' para asegurar que aparezca en chat si el servidor lo necesita.
+    screen -S blockheads_server -X stuff "say $message$(printf \\r)" 2>/dev/null || {
+        echo "[bot] Failed to send chat to server (is screen session running?)"
+    }
 }
+
+# Por compatibilidad, wrapper que intenta raw y si falla usa 'say'
+send_server_command() {
+    local message="$1"
+    # Mensajes que son comandos de consola (comienzan con '/') deben enviarse raw
+    if [[ "$message" =~ ^/ ]] ; then
+        send_server_raw "$message"
+        return
+    fi
+    # Por defecto usamos raw para bienvenidas y respuestas; si no funciona, admin puede cambiar a send_server_chat
+    send_server_raw "$message"
+}
+
+# --- utilidades para claves consistentes ---
+player_key() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
 initialize_economy() {
     if [ ! -f "$ECONOMY_FILE" ]; then
@@ -316,24 +333,18 @@ initialize_economy() {
 }
 
 is_player_in_list() {
-    local player_name="$1"
-    local list_type="$2"
-    local world_dir
-    world_dir=$(dirname "$LOG_FILE")
+    local player_name="$1"; local list_type="$2"
+    local world_dir; world_dir=$(dirname "$LOG_FILE")
     local list_file="$world_dir/${list_type}list.txt"
-    local lower_name
-    lower_name=$(player_key "$player_name")
+    local lower_name; lower_name=$(player_key "$player_name")
     [ -f "$list_file" ] && grep -q "^$lower_name$" "$list_file"
 }
 
 add_player_if_new() {
     local player_name="$1"
-    local pkey
-    pkey=$(player_key "$player_name")
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local exists
-    exists=$(echo "$current_data" | jq --arg player "$pkey" '.players | has($player)')
+    local pkey; pkey=$(player_key "$player_name")
+    local current_data; current_data=$(cat "$ECONOMY_FILE")
+    local exists; exists=$(echo "$current_data" | jq --arg player "$pkey" '.players | has($player)')
     if [ "$exists" = "false" ]; then
         current_data=$(echo "$current_data" | jq --arg player "$pkey" '.players[$player] = {"tickets": 0, "last_login": 0, "last_welcome_time": 0, "last_help_time": 0, "purchases": []}')
         echo "$current_data" > "$ECONOMY_FILE"
@@ -345,34 +356,27 @@ add_player_if_new() {
 
 give_first_time_bonus() {
     local player_name="$1"
-    local pkey
-    pkey=$(player_key "$player_name")
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local now
-    now=$(date +%s)
+    local pkey; pkey=$(player_key "$player_name")
+    local current_data; current_data=$(cat "$ECONOMY_FILE")
+    local now; now=$(date +%s)
     current_data=$(echo "$current_data" | jq --arg player "$pkey" '.players[$player].tickets = 1')
     current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson time "$now" '.players[$player].last_login = $time')
     current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "welcome_bonus", "tickets": 1, "time": $time}]')
     echo "$current_data" > "$ECONOMY_FILE"
+    # Bienvenida: usamos raw para no requerir 'say'
     send_server_command "Welcome $player_name! You received 1 welcome ticket."
     echo "[bot] Welcome bonus given to $player_name"
 }
 
 grant_login_ticket() {
     local player_name="$1"
-    local pkey
-    pkey=$(player_key "$player_name")
-    local now
-    now=$(date +%s)
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local last_login
-    last_login=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].last_login')
+    local pkey; pkey=$(player_key "$player_name")
+    local now; now=$(date +%s)
+    local current_data; current_data=$(cat "$ECONOMY_FILE")
+    local last_login; last_login=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].last_login')
     if [ "$last_login" = "null" ]; then last_login=0; fi
     if [ "$last_login" -eq 0 ] || [ $((now - last_login)) -ge 3600 ]; then
-        local current_tickets
-        current_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
+        local current_tickets; current_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
         current_tickets=${current_tickets:-0}
         local new_tickets=$((current_tickets + 1))
         current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
@@ -384,41 +388,35 @@ grant_login_ticket() {
 }
 
 has_purchased() {
-    local player_name="$1"
-    local item="$2"
-    local pkey
-    pkey=$(player_key "$player_name")
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local res
-    res=$(echo "$current_data" | jq --arg player "$pkey" --arg item "$item" '.players[$player].purchases | index($item) != null')
+    local player_name="$1"; local item="$2"; local pkey; pkey=$(player_key "$player_name")
+    local current_data; current_data=$(cat "$ECONOMY_FILE")
+    local res; res=$(echo "$current_data" | jq --arg player "$pkey" --arg item "$item" '.players[$player].purchases | index($item) != null')
     [ "$res" = "true" ]
 }
 
 add_purchase() {
-    local player_name="$1"
-    local item="$2"
-    local pkey
-    pkey=$(player_key "$player_name")
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
+    local player_name="$1"; local item="$2"; local pkey; pkey=$(player_key "$player_name")
+    local current_data; current_data=$(cat "$ECONOMY_FILE")
     current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg item "$item" '.players[$player].purchases += [$item]')
     echo "$current_data" > "$ECONOMY_FILE"
 }
 
 process_message() {
-    local player_name="$1"
-    local message="$2"
-    local pkey
-    pkey=$(player_key "$player_name")
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
-    local player_tickets
-    player_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
+    local player_name="$1"; local message="$2"
+    local pkey; pkey=$(player_key "$player_name")
+    local current_data; current_data=$(cat "$ECONOMY_FILE")
+    local player_tickets; player_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
     player_tickets=${player_tickets:-0}
+
+    # Protección: si el message es extraño como "!b" (muy corto) ignorar para evitar respuestas raras
+    if [[ "${message}" =~ ^![a-zA-Z]{1,2}$ ]]; then
+        echo "[bot] Ignoring suspicious/short command message: $message"
+        return
+    fi
 
     case "$message" in
         hi|hello|hola|Hola|Hi|Hello)
+            # Bienvenida simple: no hace falta 'say' según tu preferencia
             send_server_command "Hello $player_name! Welcome to the server. Type !tickets to check your ticket balance."
             ;;
         "!tickets")
@@ -433,7 +431,7 @@ process_message() {
                 add_purchase "$player_name" "mod"
                 current_data=$(echo "$current_data" | jq --arg player "$pkey" --arg time "$(date '+%Y-%m-%d %H:%M:%S')" '.transactions += [{"player": $player, "type": "purchase", "item": "mod", "tickets": -10, "time": $time}]')
                 echo "$current_data" > "$ECONOMY_FILE"
-                # Use slash command to change rank (server admin command)
+                # El cambio de rango necesita slash; enviamos raw comando de consola ("/mod ...")
                 screen -S blockheads_server -X stuff "/mod $player_name$(printf \\r)" 2>/dev/null || true
                 send_server_command "Congratulations $player_name! You have been promoted to MOD for 10 tickets. Remaining tickets: $new_tickets"
             else
@@ -463,22 +461,17 @@ process_message() {
 
 process_admin_command() {
     local command="$1"
-    local current_data
-    current_data=$(cat "$ECONOMY_FILE")
+    local current_data; current_data=$(cat "$ECONOMY_FILE")
 
     if [[ "$command" =~ ^!send_ticket[[:space:]]+([a-zA-Z0-9_]+)[[:space:]]+([0-9]+)$ ]]; then
-        local player_name="${BASH_REMATCH[1]}"
-        local tickets_to_add="${BASH_REMATCH[2]}"
-        local pkey
-        pkey=$(player_key "$player_name")
-        local player_exists
-        player_exists=$(echo "$current_data" | jq --arg player "$pkey" '.players | has($player)')
+        local player_name="${BASH_REMATCH[1]}"; local tickets_to_add="${BASH_REMATCH[2]}"
+        local pkey; pkey=$(player_key "$player_name")
+        local player_exists; player_exists=$(echo "$current_data" | jq --arg player "$pkey" '.players | has($player)')
         if [ "$player_exists" = "false" ]; then
             echo "Player $player_name not found in economy system."
             return
         fi
-        local current_tickets
-        current_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
+        local current_tickets; current_tickets=$(echo "$current_data" | jq -r --arg player "$pkey" '.players[$player].tickets')
         current_tickets=${current_tickets:-0}
         local new_tickets=$((current_tickets + tickets_to_add))
         current_data=$(echo "$current_data" | jq --arg player "$pkey" --argjson tickets "$new_tickets" '.players[$player].tickets = $tickets')
@@ -501,8 +494,8 @@ process_admin_command() {
 
 filter_server_log() {
     while read -r line; do
-        # drop noisy restart/starting lines (keep possible player chat)
-        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]]; then
+        # quitamos solo las líneas de arranque/restart muy evidentes (pero no "say" para no perder chats)
+        if [[ "$line" == *"Server closed"* ]] || [[ "$line" == *"Starting server"* ]] ; then
             continue
         fi
         echo "$line"
@@ -519,56 +512,62 @@ monitor_log() {
     rm -f "$admin_pipe"
     mkfifo "$admin_pipe"
 
-    # read admin stdin into admin_pipe
     ( while read -r admin_command; do
           echo "$admin_command" > "$admin_pipe"
       done ) &
 
-    # process admin commands from pipe
     ( while read -r admin_command < "$admin_pipe"; do
           process_admin_command "$admin_command"
       done ) &
 
+    # welcome_shown keyed por player_key (minúsculas) para persistir entre cambios de mayúsculas
     declare -A welcome_shown
 
-    # Tail the log and process each line after filtering
     tail -n 0 -F "$LOG_FILE" | filter_server_log | while read -r line; do
-        # Flexible "Player Connected" detection (accepts multiple timestamp/prefix formats)
+        # 1) Detección flexible de "Player connected" (varios formatos)
         if [[ "$line" =~ Player.*Connected.*([a-zA-Z0-9_]+) ]]; then
-            local player_name="${BASH_REMATCH[1]}"
-            [ "$player_name" = "SERVER" ] && continue
-            echo "[bot] Player connected: $player_name"
+            local raw_name="${BASH_REMATCH[1]}"
+            local pkey; pkey=$(player_key "$raw_name")
+            echo "[bot] Player connected: $raw_name"
             local is_new="false"
-            if add_player_if_new "$player_name"; then
+            if add_player_if_new "$raw_name"; then
                 is_new="true"
             fi
-            if [ "$is_new" = "true" ]; then
-                echo "[bot] New player: $player_name"
-                welcome_shown["$player_name"]=1
-            else
-                if [ -z "${welcome_shown[$player_name]}" ]; then
-                    send_server_command "Welcome back $player_name! Type !economy_help to see economy commands."
-                    welcome_shown["$player_name"]=1
+            # Si no se mostró la bienvenida (o fue reiniciado el bot), mostrarla otra vez y dar ticket
+            if [ -z "${welcome_shown[$pkey]:-}" ]; then
+                if [ "$is_new" = "true" ]; then
+                    # Bienvenida primera vez (raw)
+                    send_server_command "Welcome $raw_name! Type !economy_help to see economy commands."
+                else
+                    send_server_command "Welcome back $raw_name! Type !economy_help to see economy commands."
+                    grant_login_ticket "$raw_name"
                 fi
-                grant_login_ticket "$player_name"
+                welcome_shown[$pkey]=1
             fi
             continue
         fi
 
-        # Flexible disconnect detection
+        # 2) Disconnect detection (liberamos el flag para que al reconectar se vuelva a dar bienvenida)
         if [[ "$line" =~ Player.*Disconnected.*([a-zA-Z0-9_]+) ]]; then
-            local player_name="${BASH_REMATCH[1]}"
-            unset welcome_shown["$player_name"]
+            local raw_name="${BASH_REMATCH[1]}"
+            local pkey; pkey=$(player_key "$raw_name")
+            unset welcome_shown[$pkey]
+            echo "[bot] Player disconnected: $raw_name (cleared welcome flag)"
             continue
         fi
 
-        # Flexible chat detection: find "<PlayerName>: <message>" anywhere in the line
+        # 3) Chat detection: "<Player>: message" en cualquier parte de la línea
         if [[ "$line" =~ ([a-zA-Z0-9_]+):[[:space:]](.+) ]]; then
-            local player_name="${BASH_REMATCH[1]}"
+            local raw_name="${BASH_REMATCH[1]}"
             local message="${BASH_REMATCH[2]}"
-            [ "$player_name" = "SERVER" ] && continue
-            add_player_if_new "$player_name"
-            process_message "$player_name" "$message"
+            # Protección: si el message es corto y extraño, ignorar
+            if [[ -z "$message" ]] || [[ "${message}" =~ ^![a-zA-Z]{1,2}$ ]]; then
+                echo "[bot] Ignored weird chat line from $raw_name: '$message'"
+                continue
+            fi
+            [ "$raw_name" = "SERVER" ] && continue
+            add_player_if_new "$raw_name"
+            process_message "$raw_name" "$message"
             continue
         fi
     done
@@ -598,7 +597,6 @@ chmod 755 start_server.sh bot_server.sh stop_server.sh "./$SERVER_BINARY"
 chown "$ORIGINAL_USER:$ORIGINAL_USER" start_server.sh bot_server.sh stop_server.sh "./$SERVER_BINARY" || true
 
 # Create economy_data.json for the non-root user
-echo '[{"creating":"economy file"}]' >/dev/null 2>&1 || true
 sudo -u "$ORIGINAL_USER" bash -c 'cat > economy_data.json <<JSON
 {"players": {}, "transactions": []}
 JSON'
