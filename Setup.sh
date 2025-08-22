@@ -71,9 +71,6 @@ setup_worlds_directory() {
     if [[ -n "$SUDO_USER" ]]; then
         chown -R "$SUDO_USER:$SUDO_USER" "$USER_HOME/GNUstep"
     fi
-    
-    # Crear enlace simbólico al directorio de mundos
-    ln -sf "$WORLD_DIR" /opt/blockheads-server/Worlds
 }
 
 # Descargar y configurar el servidor
@@ -134,14 +131,13 @@ create_management_script() {
     
     WORLD_DIR="$USER_HOME/GNUstep/Library/ApplicationSupport/TheBlockheads/Saves"
     
-    # Crear el script usando un heredoc con comillas para evitar expansión
-    cat > /tmp/blockheads_script << 'BLOCKHEADS_EOF'
+    # Crear el script de gestión
+    cat > /usr/local/bin/blockheads << 'EOF'
 #!/usr/bin/env bash
 
 # Configuración
 SERVER_DIR="/opt/blockheads-server"
 SERVER_BIN="$SERVER_DIR/blockheads_server171"
-WORLDS_DIR="__WORLD_DIR_PLACEHOLDER__"
 
 # Función para mostrar ayuda
 show_help() {
@@ -159,32 +155,31 @@ show_help() {
     echo "  -m, --max-players MAX             Máximo de jugadores (por defecto: 16, máximo: 32)"
     echo "  -w, --world-width TAMAÑO          Tamaño del mundo (1/16, 1/4, 1, 4, 16)"
     echo "  -e, --expert-mode                 Habilitar modo experto"
-    echo "  -o, --owner PROPIETARIO           Establecer propietario del mundo"
+}
+
+# Función para obtener información de mundos
+get_world_info() {
+    cd "$SERVER_DIR"
+    "$SERVER_BIN" --list
 }
 
 # Función para obtener el ID de un mundo por nombre
 get_world_id_by_name() {
     local world_name="$1"
-    cd "$SERVER_DIR" || return 1
-    local line id name
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        id="${line%%[[:space:]]*}"
-        name="${line#$id}"
-        name="$(echo "$name" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^[|:]//' -e 's/^[[:space:]]*//')"
-        if [[ "${name,,}" == "${world_name,,}" ]]; then
-            echo "$id"
+    local world_info=$(get_world_info)
+    echo "$world_info" | while read -r line; do
+        if [[ "$line" == *"$world_name"* ]]; then
+            echo "$line" | awk '{print $1}'
             return 0
         fi
-    done < <("$SERVER_BIN" --list)
-    return 1
+    done
 }
 
 # Función para verificar si un mundo existe
 world_exists() {
     local world_id="$1"
-    cd "$SERVER_DIR" || return 1
-    if "$SERVER_BIN" --list | grep -q -E "^$world_id([[:space:]]|$|[:|])"; then
+    local world_info=$(get_world_info)
+    if echo "$world_info" | grep -q "^$world_id"; then
         return 0
     else
         return 1
@@ -196,17 +191,6 @@ create_world() {
     local world_name="$1"
     shift
     local extra_args=""
-    
-    # Verificar que el binario existe
-    if [[ ! -f "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no existe: $SERVER_BIN"
-        exit 1
-    fi
-    
-    if [[ ! -x "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no es ejecutable: $SERVER_BIN"
-        exit 1
-    fi
     
     # Parsear argumentos adicionales
     while [[ $# -gt 0 ]]; do
@@ -227,10 +211,6 @@ create_world() {
                 extra_args="$extra_args --expert-mode"
                 shift
                 ;;
-            -o|--owner)
-                extra_args="$extra_args --owner $2"
-                shift 2
-                ;;
             *)
                 echo "Opción desconocida: $1"
                 exit 1
@@ -243,8 +223,7 @@ create_world() {
     "$SERVER_BIN" --new "$world_name" $extra_args
     
     # Obtener el ID del mundo recién creado
-    local world_id
-    world_id=$(get_world_id_by_name "$world_name")
+    local world_id=$(get_world_id_by_name "$world_name")
     
     if [[ -n "$world_id" ]]; then
         echo "Mundo creado con éxito. ID: $world_id"
@@ -260,27 +239,23 @@ start_world() {
     local port="${2:-15151}"
     local world_id
     
-    # Verificar que el binario existe
-    if [[ ! -f "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no existe: $SERVER_BIN"
-        exit 1
-    fi
-    
-    if [[ ! -x "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no es ejecutable: $SERVER_BIN"
-        exit 1
-    fi
-    
     # Determinar si es un ID o nombre
-    if world_exists "$world_identifier"; then
+    if [[ "$world_identifier" =~ ^[0-9a-f]+$ ]]; then
+        # Es un ID
         world_id="$world_identifier"
     else
         # Es un nombre, obtener el ID
         world_id=$(get_world_id_by_name "$world_identifier")
         if [[ -z "$world_id" ]]; then
-            echo "Error: No existe un mundo con nombre o ID '$world_identifier'"
+            echo "Error: No existe un mundo con nombre '$world_identifier'"
             exit 1
         fi
+    fi
+    
+    # Verificar que el mundo existe
+    if ! world_exists "$world_id"; then
+        echo "Error: No existe un mundo con ID $world_id"
+        exit 1
     fi
     
     echo "Iniciando mundo ID: $world_id en puerto: $port"
@@ -290,17 +265,6 @@ start_world() {
 
 # Función para listar mundos
 list_worlds() {
-    # Verificar que el binario existe
-    if [[ ! -f "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no existe: $SERVER_BIN"
-        exit 1
-    fi
-    
-    if [[ ! -x "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no es ejecutable: $SERVER_BIN"
-        exit 1
-    fi
-    
     cd "$SERVER_DIR"
     "$SERVER_BIN" --list
 }
@@ -309,29 +273,24 @@ list_worlds() {
 delete_world() {
     local world_identifier="$1"
     local world_id
-    local reply
-    
-    # Verificar que el binario existe
-    if [[ ! -f "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no existe: $SERVER_BIN"
-        exit 1
-    fi
-    
-    if [[ ! -x "$SERVER_BIN" ]]; then
-        echo "Error: El binario del servidor no es ejecutable: $SERVER_BIN"
-        exit 1
-    fi
     
     # Determinar si es un ID o nombre
-    if world_exists "$world_identifier"; then
+    if [[ "$world_identifier" =~ ^[0-9a-f]+$ ]]; then
+        # Es un ID
         world_id="$world_identifier"
     else
         # Es un nombre, obtener el ID
         world_id=$(get_world_id_by_name "$world_identifier")
         if [[ -z "$world_id" ]]; then
-            echo "Error: No existe un mundo con nombre o ID '$world_identifier'"
+            echo "Error: No existe un mundo con nombre '$world_identifier'"
             exit 1
         fi
+    fi
+    
+    # Verificar que el mundo existe
+    if ! world_exists "$world_id"; then
+        echo "Error: No existe un mundo con ID $world_id"
+        exit 1
     fi
     
     read -r -p "¿Estás seguro de que quieres eliminar el mundo ID: $world_id? (y/N): " reply
@@ -375,12 +334,9 @@ case "$1" in
         show_help
         ;;
 esac
-BLOCKHEADS_EOF
+EOF
 
-    # Reemplazar el placeholder con la ruta real
-    sed "s|__WORLD_DIR_PLACEHOLDER__|$WORLD_DIR|g" /tmp/blockheads_script > /usr/local/bin/blockheads
     chmod +x /usr/local/bin/blockheads
-    rm -f /tmp/blockheads_script
 }
 
 # Crear script de desinstalación
