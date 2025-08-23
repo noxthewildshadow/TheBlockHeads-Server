@@ -165,7 +165,7 @@ has_purchased() {
     local item="$2"
     initialize_economy
     local has_item
-    has_item=$(jq --arg player "$player_name" --arg item "$item" '.players[$player].purchases | index($item) != null' "$ECONOMY_FILE" 2>/dev/null || echo "false")
+    has_item=$(jq --arg player "$player_name" '.players[$player].purchases | index($item) != null' "$ECONOMY_FILE" 2>/dev/null || echo "false")
     if [ "$has_item" = "true" ]; then
         return 0
     else
