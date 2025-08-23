@@ -143,6 +143,7 @@ start_server() {
         return 1
     fi
 
+    # Start the bot in a separate screen session
     start_bot "$log_file"
 
     echo "Server started successfully."
@@ -153,13 +154,23 @@ start_server() {
 
 start_bot() {
     local log_file="$1"
+    # Stop existing bot screen session if present
     if screen -list | grep -q "$SCREEN_BOT"; then
-        echo "Bot is already running."
-        return 0
+        echo "An existing bot screen session was found. Stopping it first..."
+        screen -S "$SCREEN_BOT" -X quit || true
+        sleep 1
     fi
+
     echo "Waiting for server to be ready..."
+    # Wait a bit longer for the server to be fully ready
     sleep 10
-    screen -dmS "$SCREEN_BOT" bash -c "cd \"$(pwd)\"; echo 'Starting server bot...'; ./bot_server.sh \"$log_file\""
+
+    # Start the bot in a detached screen session
+    screen -dmS "$SCREEN_BOT" bash -c "
+        cd \"$(pwd)\"
+        echo 'Starting server bot...'
+        ./bot_server.sh \"$log_file\"
+    "
     echo "Bot started successfully."
 }
 
